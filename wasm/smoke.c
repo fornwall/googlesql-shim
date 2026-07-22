@@ -57,6 +57,31 @@ int main(void) {
   printf("formatted: %.*s\n", (int)out[1], (const char*)out + 2);
   gsql_buf_free(out);
 
+  /* The analyzer proper: AnalyzeRequest with an inline catalog whose
+   * builtin_function_options is present-but-empty (default language options,
+   * so the builtin library loads), and sql_statement = "SELECT 1 + 2".
+   * Field 2 = simple_catalog { field 5 = builtin_function_options {} },
+   * field 5 = sql_statement. */
+  {
+    static const uint8_t analyze_prefix[] = {0x12, 0x02, 0x2A, 0x00, 0x2A};
+    const char* stmt = "SELECT 1 + 2";
+    size_t stmt_len = strlen(stmt);
+    memcpy(req, analyze_prefix, sizeof(analyze_prefix));
+    req[sizeof(analyze_prefix)] = (uint8_t)stmt_len;
+    memcpy(req + sizeof(analyze_prefix) + 1, stmt, stmt_len);
+    req_len = sizeof(analyze_prefix) + 1 + stmt_len;
+  }
+  out = NULL;
+  err = NULL;
+  code = gsql_call(svc, GSQL_ANALYZE, req, req_len, &out, &out_len, &err);
+  if (code != 0) {
+    fprintf(stderr, "ANALYZE failed: code=%d err=%s\n", code,
+            err ? err : "(none)");
+    return 1;
+  }
+  printf("analyzed: resolved AST proto of %zu bytes\n", out_len);
+  gsql_buf_free(out);
+
   /* The error path: a parse error must come back as a status + message. */
   req_len = encode_format_sql_request("select from from", req);
   out = NULL;

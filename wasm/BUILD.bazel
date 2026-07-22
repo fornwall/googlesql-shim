@@ -19,6 +19,14 @@ cc_binary(
         # GoogleSQL's parser and resolver recurse; the 64K default wasm
         # stack is not sized for them.
         "-sSTACK_SIZE=8MB",
+        # AnalyzerOptions' constructor CHECK-fails unless
+        # FindTimeZoneByName("America/Los_Angeles") works, and absl/cctz
+        # resolves names by reading /usr/share/zoneinfo from the (virtual)
+        # filesystem. Embed the host's tzdata (~0.6M) into the module's
+        # MEMFS at the same path. Deliberately non-hermetic -- the smoke
+        # test is not a release artifact; a real consumer must make the
+        # same decision (embed tzdata, or mount a filesystem).
+        "--embed-file=/usr/share/zoneinfo@/usr/share/zoneinfo",
     ],
     deps = [
         "//shim:shim_lib",
