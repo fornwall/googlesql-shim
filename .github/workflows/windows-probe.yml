@@ -68,3 +68,21 @@ jobs:
         run: |
           bazel --version
           bazel --ignore_all_rc_files build -c opt --check_visibility=false '--incompatible_autoload_externally=+ProtoInfo,+CcInfo,+JavaInfo,+JavaPluginInfo,+proto_library,+cc_library,+cc_binary,+cc_test,+cc_import,+cc_proto_library,+cc_shared_library,+java_library,+java_binary,+java_test,+java_import,+java_plugin,+java_proto_library,+java_lite_proto_library' --cxxopt=/std:c++20 '${{ inputs.target }}'
+
+      - name: Dump foreign_cc state on failure
+        if: failure()
+        shell: pwsh
+        run: |
+          $out = bazel --ignore_all_rc_files info output_path
+          $icu = "$out\x64_windows-opt\bin\external\googlesql++googlesql_http_archive_deps+icu"
+          if (-not (Test-Path $icu)) { $icu = "$out\arm64_windows-opt\bin\external\googlesql++googlesql_http_archive_deps+icu" }
+          Write-Host "== foreign_cc tree (first 80 entries):"
+          Get-ChildItem -Recurse -ErrorAction SilentlyContinue $icu | Select-Object -First 80 -ExpandProperty FullName
+          Write-Host "== wrapper log tails:"
+          Get-ChildItem -Recurse -Include *.log -ErrorAction SilentlyContinue $icu | ForEach-Object {
+            Write-Host "---- $($_.FullName)"
+            Get-Content $_.FullName -Tail 120
+          }
+          $ext = bazel --ignore_all_rc_files info output_base
+          Write-Host "== fetched ICU source dir (aux files present?):"
+          Get-ChildItem -ErrorAction SilentlyContinue "$ext\external\googlesql++googlesql_http_archive_deps+icu\source" | Select-Object -First 40 -ExpandProperty Name

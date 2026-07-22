@@ -14,6 +14,32 @@ cc_library(
     name = "shim_lib",
     srcs = ["shim.cc"],
     hdrs = ["shim.h"],
+    # Strict warnings for our one TU, per-target and never in .bazelrc: the
+    # global -Wno-* copts there exist to quiet upstream GoogleSQL, which
+    # would not survive -Wall. -Werror sits directly in copts (not behind a
+    # CI-only define) so local builds fail on warnings exactly like CI; all
+    # release toolchains are clang-family, so one switch set serves.
+    #
+    # The -Wno-* list below silences categories that fire *inside GoogleSQL
+    # headers* this TU includes (verified: with these six suppressed, the
+    # build is warning-free, i.e. shim.cc itself was clean under
+    # -Wall -Wextra). Bazel's external_include_paths feature was tried and
+    # does not help: the repo-root -iquote entries for external deps remain
+    # on the command line ahead of the -isystem copies, so header warnings
+    # still attribute. -Wno-unknown-warning-option keeps older clangs from
+    # tripping over the newer categories' names under -Werror.
+    copts = [
+        "-Wall",
+        "-Wextra",
+        "-Werror",
+        "-Wno-unknown-warning-option",
+        "-Wno-unused-parameter",
+        "-Wno-character-conversion",
+        "-Wno-sign-compare",
+        "-Wno-implicit-const-int-float-conversion",
+        "-Wno-missing-designated-field-initializers",
+        "-Wno-ignored-qualifiers",
+    ],
     visibility = ["//visibility:public"],
     deps = [
         "@com_google_absl//absl/status",

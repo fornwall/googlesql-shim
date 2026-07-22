@@ -26,6 +26,9 @@ env:
   # The fornwall/googlesql commit MODULE.bazel pins (asserted below, so the
   # release notes cannot drift from the actual build input).
   GOOGLESQL_COMMIT: 8d06b161dfd9fcbc69ab9765713ad817ebc31104
+  # One LLVM major for the gnu and darwin legs: apt.llvm.org's latest
+  # stable branch for noble, which Homebrew also serves as llvm@21.
+  LLVM_MAJOR: "21"
 
 jobs:
   build:
@@ -82,14 +85,21 @@ jobs:
       # members exist; the verify step below pins that. On macOS everything
       # is PIC anyway and objects carry no .pic.o suffix; the flag is
       # accepted and harmless there.
+      # Clang comes from apt.llvm.org (its latest stable branch for noble,
+      # currently 21; arm64 debs are served too), pinned by major rather
+      # than taken from the runner image so releases stay reproducible as
+      # the image's default clang drifts.
       - name: Build (linux-gnu)
         if: matrix.kind == 'linux-gnu'
         run: |
-          clang-18 --version
+          wget -q https://apt.llvm.org/llvm.sh
+          chmod +x llvm.sh
+          sudo ./llvm.sh "$LLVM_MAJOR"
+          "clang-$LLVM_MAJOR" --version
           bazel --version
           bazel build -c opt --force_pic \
-            --repo_env=CC=/usr/bin/clang-18 \
-            --repo_env=CXX=/usr/bin/clang++-18 \
+            --repo_env=CC="/usr/bin/clang-$LLVM_MAJOR" \
+            --repo_env=CXX="/usr/bin/clang++-$LLVM_MAJOR" \
             //shim:static
           mkdir dist
           cp -L bazel-bin/shim/libgooglesql_shim.a \
@@ -98,7 +108,7 @@ jobs:
           {
             echo "triple: ${{ matrix.triple }}"
             echo "bazel: $(bazel --version)"
-            echo "cc: $(clang-18 --version | head -1)"
+            echo "cc: $("clang-$LLVM_MAJOR" --version | head -1)"
             echo "libc: $(ldd --version | head -1)"
             echo "os: $(lsb_release -ds) (GitHub ${{ matrix.os }} runner)"
           } > dist/toolchain.txt
@@ -115,19 +125,34 @@ jobs:
         if: matrix.kind == 'linux-musl'
         run: |
           mkdir dist
-          docker run --rm -v "$PWD":/src:ro -v "$PWD/dist":/out alpine:edge \
+          docker run --rm -v "$PWD":/src:ro -v "$PWD/dist":/out alpine:3.23 \
             sh /src/scripts/build-musl.sh
           sudo chown -R "$(id -u):$(id -g)" dist
           df -h /
 
+      # Homebrew's llvm@N -- the same major as the linux-gnu apt.llvm.org
+      # pin -- rather than the image's Xcode clang, again so releases stay
+      # reproducible across runner-image updates. Overriding CC moves Bazel
+      # to its generic Unix toolchain, whose autoconfig and compile actions
+      # both need the Apple SDK: SDKROOT is exported into the repo rule and
+      # the actions.
       - name: Build (darwin)
         if: matrix.kind == 'darwin'
         run: |
           command -v bazel >/dev/null || brew install bazelisk
           command -v zstd >/dev/null || brew install zstd
-          cc --version
+          brew install "llvm@$LLVM_MAJOR"
+          LLVM_PREFIX="$(brew --prefix "llvm@$LLVM_MAJOR")"
+          "$LLVM_PREFIX/bin/clang" --version
+          SDKROOT="$(xcrun --show-sdk-path)"
+          export SDKROOT
           bazel --version
-          bazel build -c opt --force_pic ${{ matrix.bazel_flags }} //shim:static
+          bazel build -c opt --force_pic ${{ matrix.bazel_flags }} \
+            --repo_env=CC="$LLVM_PREFIX/bin/clang" \
+            --repo_env=CXX="$LLVM_PREFIX/bin/clang++" \
+            --repo_env=SDKROOT="$SDKROOT" \
+            --action_env=SDKROOT="$SDKROOT" \
+            //shim:static
           mkdir dist
           cp -L bazel-bin/shim/libgooglesql_shim.a \
                 bazel-bin/shim/libgooglesql_shim_alwayslink.a \
@@ -135,8 +160,8 @@ jobs:
           {
             echo "triple: ${{ matrix.triple }}"
             echo "bazel: $(bazel --version)"
-            echo "cc: $(cc --version | head -1)"
-            echo "os: $(sw_vers -productName) $(sw_vers -productVersion) (GitHub ${{ matrix.os }} runner)"
+            echo "cc: $("$LLVM_PREFIX/bin/clang" --version | head -1)"
+            echo "os: $(sw_vers -productName) $(sw_vers -productVersion) (GitHub ${{ matrix.os }} runner), SDK $(xcrun --show-sdk-version)"
           } > dist/toolchain.txt
 
       - name: Verify artifacts
@@ -187,7 +212,10 @@ jobs:
           } > dist/BUILDINFO.txt
           rm dist/toolchain.txt
           cat dist/BUILDINFO.txt
-          tar -cf - -C dist . | zstd -T0 -12 -o "$name.tar.zst"
+          # -19: measured on a 244 MB archive, 29.2 -> 20.3 MB vs -3 with
+          # identical decompression time (zstd decode speed is level-
+          # independent); the ~19 s/artifact encode cost is paid once here.
+          tar -cf - -C dist . | zstd -19 -T0 -o "$name.tar.zst"
           ls -la "$name.tar.zst"
 
       - uses: actions/upload-artifact@v7

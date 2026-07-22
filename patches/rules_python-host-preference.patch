@@ -1,0 +1,25 @@
+The RULES_PYTHON_REPO_TOOLCHAIN_<VER>_<OS>_<CPU> host-interpreter override
+compares the env var's string against a list of (platform, meta) tuples, so
+any preference fails with "Please choose a preferred interpreter out of the
+following platforms" -- and had it passed, `candidates = [preference]` would
+crash the later tuple unpack. Compare and filter by platform name instead.
+
+The override is what lets the *-linux-musl release legs pick the musl
+python-build-standalone interpreter: the default candidate order puts the
+glibc build first, and a glibc interpreter does not run on Alpine.
+
+--- a/python/private/toolchains_repo.bzl
++++ b/python/private/toolchains_repo.bzl
+@@ -598,10 +598,10 @@
+                 env_var,
+                 candidates,
+             ))
+-        elif preference not in candidates:
++        elif preference not in [c[0] for c in candidates]:
+             return logger.fail("Please choose a preferred interpreter out of the following platforms: {}".format(candidates))
+         else:
+-            candidates = [preference]
++            candidates = [c for c in candidates if c[0] == preference]
+ 
+     if candidates:
+         platform_name, meta = candidates[0]

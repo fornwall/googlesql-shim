@@ -31,6 +31,20 @@ archive_override(
 bazel_dep(name = "abseil-cpp", version = "20260107.0", repo_name = "com_google_absl")
 bazel_dep(name = "rules_cc", version = "0.2.17")
 
+# Same version GoogleSQL already resolves to, plus one patch: the
+# RULES_PYTHON_REPO_TOOLCHAIN_* host-interpreter override compares the env
+# var against (platform, meta) tuples instead of platform names, so it can
+# never match. The musl release legs depend on that override to select the
+# musl python-build-standalone interpreter (the default candidate order puts
+# the glibc build first, which does not run on Alpine); see
+# scripts/build-musl.sh.
+single_version_override(
+    module_name = "rules_python",
+    patch_strip = 1,
+    patches = ["//patches:rules_python-host-preference.patch"],
+    version = "1.6.1",
+)
+
 # Cold-build speed: use the host's `make` and `pkg-config` to drive ICU's
 # `configure_make`, instead of letting rules_foreign_cc build both tools from
 # source first (those two bootstraps sit on the build's serial critical path
