@@ -1,0 +1,58 @@
+# Lint checks on pushes to main and on pull requests. The release pipeline
+# lives in release.yml; this only keeps the sources honest:
+# - actionlint on the workflow files,
+# - clang-format (pinned via pip, so local runs can match exactly) on the
+#   C++ shim sources,
+# - buildifier on the Bazel files (MODULE.bazel, BUILD.bazel, *.bzl),
+# - shellcheck on the shell scripts.
+
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  actionlint:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run actionlint
+        run: |
+          bash <(curl -sSfL https://raw.githubusercontent.com/rhysd/actionlint/v1.7.7/scripts/download-actionlint.bash) 1.7.7
+          ./actionlint -color
+
+  clang-format:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check formatting of the shim sources
+        run: |
+          pip install clang-format==19.1.7
+          clang-format --version
+          clang-format --dry-run --Werror shim/shim.cc shim/shim.h
+
+  buildifier:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check Bazel files
+        run: |
+          curl -sSfL -o buildifier \
+            https://github.com/bazelbuild/buildtools/releases/download/v8.2.1/buildifier-linux-amd64
+          chmod +x buildifier
+          ./buildifier --version
+          ./buildifier -mode=check -lint=warn -r .
+
+  shellcheck:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Shellcheck all scripts
+        run: |
+          shellcheck --version
+          git ls-files '*.sh' | xargs -r shellcheck

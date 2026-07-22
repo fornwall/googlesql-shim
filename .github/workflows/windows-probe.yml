@@ -1,0 +1,44 @@
+# A deliberately separate, manual probe of Windows support -- NOT part of the
+# release pipeline. Upstream GoogleSQL (ZetaSQL lineage) has never supported
+# MSVC/Windows: POSIX assumptions run through the tree, the local_service
+# build uses flex/bison outputs and pthreads, and ICU is built via
+# rules_foreign_cc's configure_make, which needs a POSIX shell. This workflow
+# exists to document that empirically rather than by assertion; see the
+# platform table in the README for the current status. If a run of this ever
+# goes green, promote the leg into release.yml.
+
+name: windows-probe
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - triple: x86_64-pc-windows
+            os: windows-latest
+          - triple: aarch64-pc-windows
+            os: windows-11-arm
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Probe the build
+        shell: bash
+        run: |
+          bazel --version || bazelisk --version
+          # The checked-in .bazelrc carries clang/GNU flags that MSVC would
+          # reject before the real portability problems even surface, so the
+          # probe bypasses rc files and passes the minimal equivalents.
+          bazel --ignore_all_rc_files build -c opt \
+            --check_visibility=false \
+            --incompatible_autoload_externally=+ProtoInfo,+CcInfo,+JavaInfo,+JavaPluginInfo,+proto_library,+cc_library,+cc_binary,+cc_test,+cc_import,+cc_proto_library,+cc_shared_library,+java_library,+java_binary,+java_test,+java_import,+java_plugin,+java_proto_library,+java_lite_proto_library \
+            --cxxopt=/std:c++20 \
+            //shim:static

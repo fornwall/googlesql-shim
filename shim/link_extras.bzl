@@ -108,8 +108,16 @@ def _cc_alwayslink_objects_impl(ctx):
     )
 
     args = ctx.actions.args()
-    args.add("rcsD")  # replace, create, index, deterministic
-    args.add(out)
+    if archiver.endswith("libtool"):
+        # Apple's libtool (what the Xcode toolchain registers for the
+        # static-library action) takes -static -o <out>, not ar-style
+        # member commands.
+        args.add("-static")
+        args.add("-D")  # deterministic
+        args.add("-o", out)
+    else:
+        args.add("rcsD")  # replace, create, index, deterministic
+        args.add(out)
     args.add_all(objects)
     ctx.actions.run(
         executable = archiver,

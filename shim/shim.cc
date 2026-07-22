@@ -282,9 +282,8 @@ absl::Status AnalyzeWithCatalogImpl(const uint8_t* options_bytes,
   gs::TypeFactory factory;
   gs::AnalyzerOptions options;
   const std::vector<const google::protobuf::DescriptorPool*> pools;
-  absl::Status status =
-      gs::AnalyzerOptions::Deserialize(options_proto, pools, &factory,
-                                       &options);
+  absl::Status status = gs::AnalyzerOptions::Deserialize(options_proto, pools,
+                                                         &factory, &options);
   if (!status.ok()) return status;
 
   // The builtin function library is keyed off the request's language options,
@@ -322,22 +321,24 @@ absl::Status AnalyzeWithCatalogImpl(const uint8_t* options_bytes,
 //
 // Both type arguments must be fully qualified: most live in `ls`, but the
 // option and catalog protos live in `gs`.
-#define GSQL_DISPATCH(CODE, METHOD, ReqT, RespT)                     \
-  case CODE: {                                                       \
-    ReqT parsed;                                                     \
-    if (!parsed.ParseFromArray(req, static_cast<int>(req_len))) {    \
-      *err = dup_cstr("failed to parse " #ReqT);                     \
-      return static_cast<int>(absl::StatusCode::kInvalidArgument);   \
-    }                                                                \
-    RespT resp;                                                      \
-    absl::Status st = svc->impl.METHOD(parsed, &resp);               \
-    if (!st.ok()) return fail(st, err);                              \
-    return emit(resp, out, out_len, err);                            \
+#define GSQL_DISPATCH(CODE, METHOD, ReqT, RespT)                   \
+  case CODE: {                                                     \
+    ReqT parsed;                                                   \
+    if (!parsed.ParseFromArray(req, static_cast<int>(req_len))) {  \
+      *err = dup_cstr("failed to parse " #ReqT);                   \
+      return static_cast<int>(absl::StatusCode::kInvalidArgument); \
+    }                                                              \
+    RespT resp;                                                    \
+    absl::Status st = svc->impl.METHOD(parsed, &resp);             \
+    if (!st.ok()) return fail(st, err);                            \
+    return emit(resp, out, out_len, err);                          \
   }
 
 extern "C" {
 
-gsql_service* gsql_service_new(void) { return new (std::nothrow) gsql_service(); }
+gsql_service* gsql_service_new(void) {
+  return new (std::nothrow) gsql_service();
+}
 
 void gsql_service_free(gsql_service* svc) { delete svc; }
 
@@ -422,9 +423,8 @@ int gsql_analyze_with_catalog(const uint8_t* options, size_t options_len,
   // Same exception firewall as `gsql_call`: unwinding across the C ABI is UB.
   try {
     ls::AnalyzeResponse response;
-    absl::Status st = AnalyzeWithCatalogImpl(options, options_len, sql,
-                                             sql_len, callbacks, ctx,
-                                             &response);
+    absl::Status st = AnalyzeWithCatalogImpl(options, options_len, sql, sql_len,
+                                             callbacks, ctx, &response);
     if (!st.ok()) return fail(st, err);
     return emit(response, out, out_len, err);
   } catch (const std::exception& e) {

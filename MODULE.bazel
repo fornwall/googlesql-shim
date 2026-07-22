@@ -41,6 +41,7 @@ bazel_dep(name = "rules_cc", version = "0.2.17")
 # registers by default. Requires `make` and `pkg-config` on PATH -- as this
 # build already requires a system Clang (CC/CXX from the environment).
 bazel_dep(name = "rules_foreign_cc", version = "0.15.0")
+
 register_toolchains(
     "@rules_foreign_cc//toolchains:preinstalled_make_toolchain",
     "@rules_foreign_cc//toolchains:preinstalled_pkgconfig_toolchain",

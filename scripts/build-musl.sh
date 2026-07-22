@@ -36,7 +36,7 @@ cp -L bazel-bin/shim/libgooglesql_shim.a \
       /out/
 
 {
-  echo "triple: x86_64-linux-musl"
+  echo "triple: $(uname -m)-linux-musl"
   echo "bazel: $(bazel --version)"
   echo "cc: $(clang --version | head -1)"
   echo "libc: musl $(apk list --installed 2>/dev/null | grep '^musl-[0-9]' || true)"
