@@ -51,6 +51,12 @@ jobs:
         run: |
           C:\msys64\usr\bin\pacman.exe -S --noconfirm --needed autoconf automake libtool make pkgconf
           Add-Content $env:GITHUB_ENV "BAZEL_SH=C:\msys64\usr\bin\bash.exe"
+          # msys2's `bash -c` does not prepend /usr/bin, so repo-rule
+          # patch_cmds like `find ...` otherwise resolve to System32's
+          # FIND.EXE ("Parameter format not correct"). Note this shadows
+          # some Windows binaries (e.g. coreutils link.exe over MSVC's) --
+          # Bazel reaches cl/link by absolute path, so far no harm seen.
+          Add-Content $env:GITHUB_PATH "C:\msys64\usr\bin"
 
       # pwsh rather than bash: git-bash's MSYS path conversion mangles
       # //-prefixed labels. The checked-in .bazelrc carries clang/GNU flags
