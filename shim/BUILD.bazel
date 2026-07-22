@@ -1,0 +1,90 @@
+# The GoogleSQL C shim and the targets that flatten it, together with its
+# whole transitive GoogleSQL closure, into static archives for a non-Bazel
+# consumer (smallquery's crates/googlesql-sys, whose build.rs links exactly
+# the artifact set `:static` produces).
+#
+# The sources here originate from fornwall/smallquery,
+# crates/googlesql-sys/shim.
+
+load("@rules_cc//cc:cc_static_library.bzl", "cc_static_library")
+load("@rules_cc//cc:defs.bzl", "cc_library")
+load(":link_extras.bzl", "cc_alwayslink_objects", "cc_link_extras")
+
+cc_library(
+    name = "shim_lib",
+    srcs = ["shim.cc"],
+    hdrs = ["shim.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:statusor",
+        "@com_google_absl//absl/types:span",
+        "@googlesql//googlesql/local_service:local_service_analysis",
+        "@googlesql//googlesql/local_service:local_service_cc_proto",
+        "@googlesql//googlesql/proto:options_cc_proto",
+        "@googlesql//googlesql/public:analyzer",
+        "@googlesql//googlesql/public:analyzer_options",
+        "@googlesql//googlesql/public:builtin_function_options",
+        "@googlesql//googlesql/public:catalog",
+        "@googlesql//googlesql/public:simple_catalog",
+        "@googlesql//googlesql/public:simple_table_cc_proto",
+        "@googlesql//googlesql/public/types:type_factory",
+        "@googlesql//googlesql/resolved_ast",
+    ],
+)
+
+# Flattens the shim and every transitive dependency into one `.a`.
+#
+# `symbol_check` is off: it rejects duplicate symbols across the whole closure,
+# and GoogleSQL's closure has them (weak/COMDAT definitions repeated across
+# archives are normal and the linker picks one).
+#
+# HAZARD: a `.a` carries no `alwayslink` metadata, so the object from
+# `@googlesql//googlesql/public/types:type_with_catalog_impl` (a bare static
+# initializer, referenced by nothing) is a member the linker drops -- measured,
+# and with no link error. The `:googlesql_shim_alwayslink` side archive below
+# carries those objects for the consumer to link with `+whole-archive`;
+# smallquery's `googlesql-sys/tests/alwayslink_canary.rs` fails loudly if the
+# object ever goes missing from the final binary.
+cc_static_library(
+    name = "googlesql_shim",
+    features = ["-symbol_check"],
+    visibility = ["//visibility:public"],
+    deps = [":shim_lib"],
+)
+
+# The objects of every `alwayslink = 1` target in the closure, as a small
+# separate archive that the consumer links with `+whole-archive` -- scoping
+# the force-load to the objects that need it instead of the whole bundle. The
+# bundle above still contains a duplicate copy of each object; that is
+# harmless, because an alwayslink object exports no strong global symbol
+# (that is why it needs alwayslink), so the linker never selects the copy.
+cc_alwayslink_objects(
+    name = "googlesql_shim_alwayslink",
+    visibility = ["//visibility:public"],
+    deps = [":shim_lib"],
+)
+
+# ICU is built by rules_foreign_cc, so it hands Bazel four finished `.a` files
+# and no object files -- which means `cc_static_library` leaves it out. These
+# are staged beside the bundle so one `-L` covers the whole link.
+cc_link_extras(
+    name = "googlesql_shim_extras",
+    visibility = ["//visibility:public"],
+    deps = [":shim_lib"],
+)
+
+# What a release is built from:
+#   bazel build -c opt --force_pic //shim:static
+# --force_pic matters: without it, `-c opt` makes cc_static_library pack both
+# the PIC and non-PIC variants of every object into the bundle, and a consumer
+# linking it with --whole-archive fails on the resulting duplicate symbols.
+filegroup(
+    name = "static",
+    srcs = [
+        ":googlesql_shim",
+        ":googlesql_shim_alwayslink",
+        ":googlesql_shim_extras",
+    ],
+    visibility = ["//visibility:public"],
+)

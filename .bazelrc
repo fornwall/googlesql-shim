@@ -1,0 +1,68 @@
+# Toolchain
+# ---------
+# GoogleSQL is developed against Clang, so build with Clang too. GCC 15 makes
+# -Wchanges-meaning a hard error, which rejects
+# `virtual const Type* Type() const` in public/property_graph.h.
+#
+# CC/CXX are deliberately NOT set here: pass them on the command line, e.g.
+#   bazel build --repo_env=CC=/usr/bin/clang-18 --repo_env=CXX=/usr/bin/clang++-18 ...
+# (the release workflow does exactly that with the runner's clang).
+#
+# Upstream registers its own hermetic LLVM toolchain, but only as a
+# dev_dependency -- so it applies when GoogleSQL is the root module, not when
+# it is a dependency as it is here. That is just as well: the bundled LLVM's
+# ld.lld needs libxml2.so.2, which modern distros no longer ship.
+
+# Language
+# --------
+build --cxxopt=-std=c++20 --host_cxxopt=-std=c++20
+
+# A Clang defaulting to C23 rejects C sources that use `bool` as an identifier;
+# `-std=gnu17` pins every C compilation to the older dialect (protobuf, zlib,
+# and the other vendored C code).
+build --conlyopt=-std=gnu17 --host_conlyopt=-std=gnu17
+
+# Warnings, mirroring the `build:clang` config in GoogleSQL's own .bazelrc.
+build --cxxopt=-Wno-deprecated-declarations
+build --cxxopt=-Wno-inconsistent-missing-override
+build --cxxopt=-Wno-range-loop-analysis
+build --cxxopt=-Wno-char-subscripts
+build --cxxopt=-Wno-enum-compare-switch
+build --cxxopt=-Wno-defaulted-function-deleted
+build --cxxopt=-Wno-unused-private-field
+build --cxxopt=-Wno-unused-const-variable
+build --cxxopt=-Wno-unused-function
+build --cxxopt=-Wno-macro-redefined
+build --cxxopt=-Wno-unused-command-line-argument
+build --cxxopt=-Wno-module-import-in-extern-c
+
+# Platform-specific sections below (build:linux / build:macos).
+common --enable_platform_specific_config
+
+# Linking (Linux only -- ld64 on macOS has neither flag spelling, and the
+# problem is GNU-ld-specific)
+# -------
+# Bazel emits -lstdc++ inside a --push-state,-as-needed block. ICU places
+# LDFLAGS before its object files, so -as-needed drops it and the C++ runtime
+# symbols go unresolved. --no-as-needed, plus a spelling that is not
+# deduplicated against Bazel's own entry, forces it to land last. Works on
+# both glibc and musl (Alpine ships libstdc++.so.6 too).
+build:linux --linkopt=-Wl,--no-as-needed --linkopt=-l:libstdc++.so.6
+build:linux --host_linkopt=-Wl,--no-as-needed --host_linkopt=-l:libstdc++.so.6
+
+# Visibility
+# ----------
+# //googlesql/local_service is package-private to //googlesql/..., so an
+# external module cannot depend on it under normal visibility rules. The shim
+# deliberately reaches past that boundary; it is the whole point of this repo.
+build --check_visibility=false
+
+# Loading
+# -------
+# grpc-java's java_grpc_library.bzl uses the ProtoInfo global, which newer
+# protobuf rules no longer autoload. GoogleSQL's local_service BUILD declares
+# Java targets alongside the C++ ones, so merely loading that package fails
+# without this -- even though the shim only needs the cc_library and never
+# links gRPC. Enabling autoload drops every native rule not listed, hence the
+# full set rather than just ProtoInfo.
+common --incompatible_autoload_externally=+ProtoInfo,+CcInfo,+JavaInfo,+JavaPluginInfo,+proto_library,+cc_library,+cc_binary,+cc_test,+cc_import,+cc_proto_library,+cc_shared_library,+java_library,+java_binary,+java_test,+java_import,+java_plugin,+java_proto_library,+java_lite_proto_library

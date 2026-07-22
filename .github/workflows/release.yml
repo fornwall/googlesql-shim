@@ -1,0 +1,211 @@
+# Builds the static GoogleSQL shim archives for every supported platform and
+# attaches one tarball per platform, plus SHA256SUMS, to a GitHub release.
+# Triggered by pushing a `v*` tag; workflow_dispatch builds and uploads
+# workflow artifacts instead (no release), for testing.
+#
+# The build is self-contained: GoogleSQL is fetched by Bazel via the
+# archive_override pin in MODULE.bazel; nothing is checked out from
+# fornwall/smallquery.
+
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  # The fornwall/googlesql commit MODULE.bazel pins (asserted below, so the
+  # release notes cannot drift from the actual build input).
+  GOOGLESQL_COMMIT: 8d06b161dfd9fcbc69ab9765713ad817ebc31104
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - triple: x86_64-linux-gnu
+            os: ubuntu-24.04
+          - triple: x86_64-linux-musl
+            os: ubuntu-24.04
+          - triple: aarch64-apple-darwin
+            os: macos-15
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    steps:
+      - name: Free disk space
+        if: runner.os == 'Linux'
+        run: |
+          df -h /
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc \
+            /usr/local/.ghcup /usr/local/share/boost /usr/local/share/powershell \
+            /usr/share/swift "$AGENT_TOOLSDIRECTORY"
+          df -h /
+
+      - uses: actions/checkout@v4
+
+      - name: Verify the pinned GoogleSQL commit matches MODULE.bazel
+        run: grep -q "$GOOGLESQL_COMMIT" MODULE.bazel
+
+      # --force_pic is load-bearing on Linux, not an optimisation: under plain
+      # `-c opt`, cc_static_library packs BOTH the PIC and non-PIC variants of
+      # every object into the archive (shim.o AND shim.pic.o), and the
+      # consumer's +whole-archive link then fails with mass duplicate-symbol
+      # errors (measured; fastbuild only ever produced PIC members, which is
+      # why the dev build never hit this). With --force_pic only .pic.o
+      # members exist; the verify step below pins that. On macOS everything
+      # is PIC anyway and objects carry no .pic.o suffix; the flag is
+      # accepted and harmless there.
+      - name: Build (x86_64-linux-gnu)
+        if: matrix.triple == 'x86_64-linux-gnu'
+        run: |
+          clang-18 --version
+          bazel --version
+          bazel build -c opt --force_pic \
+            --repo_env=CC=/usr/bin/clang-18 \
+            --repo_env=CXX=/usr/bin/clang++-18 \
+            //shim:static
+          mkdir dist
+          cp -L bazel-bin/shim/libgooglesql_shim.a \
+                bazel-bin/shim/libgooglesql_shim_alwayslink.a \
+                bazel-bin/shim/libicu*.a dist/
+          {
+            echo "triple: ${{ matrix.triple }}"
+            echo "bazel: $(bazel --version)"
+            echo "cc: $(clang-18 --version | head -1)"
+            echo "libc: $(ldd --version | head -1)"
+            echo "os: $(lsb_release -ds) (GitHub ${{ matrix.os }} runner)"
+          } > dist/toolchain.txt
+          df -h /
+
+      # musl cannot run upstream Bazel (glibc-only binaries); the build runs
+      # natively inside an Alpine container instead -- see the script for the
+      # full story (Alpine's musl-native bazel8 package, plus gcompat for the
+      # one glibc-linked piece: rules_python's hermetic CPython, which only
+      # runs GoogleSQL's code generators and contributes nothing to the
+      # archives).
+      - name: Build (x86_64-linux-musl, in an Alpine container)
+        if: matrix.triple == 'x86_64-linux-musl'
+        run: |
+          mkdir dist
+          docker run --rm -v "$PWD":/src:ro -v "$PWD/dist":/out alpine:edge \
+            sh /src/scripts/build-musl.sh
+          sudo chown -R "$(id -u):$(id -g)" dist
+          df -h /
+
+      - name: Build (aarch64-apple-darwin)
+        if: matrix.triple == 'aarch64-apple-darwin'
+        run: |
+          command -v bazel >/dev/null || brew install bazelisk
+          command -v zstd >/dev/null || brew install zstd
+          cc --version
+          bazel --version
+          bazel build -c opt --force_pic //shim:static
+          mkdir dist
+          cp -L bazel-bin/shim/libgooglesql_shim.a \
+                bazel-bin/shim/libgooglesql_shim_alwayslink.a \
+                bazel-bin/shim/libicu*.a dist/
+          {
+            echo "triple: ${{ matrix.triple }}"
+            echo "bazel: $(bazel --version)"
+            echo "cc: $(cc --version | head -1)"
+            echo "os: $(sw_vers -productName) $(sw_vers -productVersion) (GitHub ${{ matrix.os }} runner)"
+          } > dist/toolchain.txt
+
+      - name: Verify artifacts
+        run: |
+          cd dist
+          ls -la
+          test -f libgooglesql_shim.a
+          test -f libgooglesql_shim_alwayslink.a
+          ls libicu*.a
+          # The alwayslink hazard guard: the side archive must carry the
+          # ROW-type static-initializer object that smallquery force-loads
+          # with +whole-archive (`row_type_with_catalog.pic.o` on Linux,
+          # no .pic infix on macOS).
+          ar t libgooglesql_shim_alwayslink.a
+          ar t libgooglesql_shim_alwayslink.a | grep -q 'row_type_with_catalog'
+          ar t libgooglesql_shim.a | grep -q 'row_type_with_catalog'
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            # --force_pic worked: no non-PIC members, or the consumer's
+            # +whole-archive link explodes with duplicate symbols.
+            nonpic=$(ar t libgooglesql_shim.a | grep -vc '\.pic\.o$' || true)
+            echo "non-PIC members in bundle: $nonpic"
+            test "$nonpic" -eq 0
+          fi
+
+      - name: Package
+        run: |
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            version="$GITHUB_REF_NAME"
+          else
+            version="dev-$(echo "$GITHUB_SHA" | cut -c1-7)"
+          fi
+          name="googlesql-shim-$version-${{ matrix.triple }}"
+          {
+            echo "package: $name"
+            echo "source: fornwall/googlesql-shim@$GITHUB_SHA"
+            echo "googlesql: fornwall/googlesql@$GOOGLESQL_COMMIT"
+            echo "build: bazel build -c opt --force_pic //shim:static"
+            cat dist/toolchain.txt
+          } > dist/BUILDINFO.txt
+          rm dist/toolchain.txt
+          cat dist/BUILDINFO.txt
+          tar -cf - -C dist . | zstd -T0 -12 -o "$name.tar.zst"
+          ls -la "$name.tar.zst"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: googlesql-shim-${{ matrix.triple }}
+          path: "*.tar.zst"
+          compression-level: 0
+
+  release:
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Download platform tarballs
+        uses: actions/download-artifact@v4
+        with:
+          path: assets
+          pattern: googlesql-shim-*
+          merge-multiple: true
+
+      - name: Checksums
+        run: |
+          cd assets
+          sha256sum -- *.tar.zst > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Create release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          {
+            echo "Prebuilt static GoogleSQL shim archives for [smallquery](https://github.com/fornwall/smallquery)."
+            echo
+            echo "Built from:"
+            echo "- fornwall/googlesql-shim@${GITHUB_SHA} (shim sources + build config)"
+            echo "- fornwall/googlesql@${GOOGLESQL_COMMIT} (via MODULE.bazel archive_override)"
+            echo
+            echo "Build: \`bazel build -c opt --force_pic //shim:static\` per platform; each tarball's \`BUILDINFO.txt\` records the exact toolchain (bazel, compiler, libc, OS image)."
+            echo
+            echo "One \`.tar.zst\` per platform (extract with \`tar --zstd -xf\`), containing at its root: \`libgooglesql_shim.a\`, \`libgooglesql_shim_alwayslink.a\`, the ICU archives (\`libicudata.a\`, \`libicuuc.a\`, \`libicui18n.a\`, \`libicuio.a\`) and \`BUILDINFO.txt\`. \`SHA256SUMS\` covers all tarballs (\`sha256sum -c\`). See the README for how the archives map onto smallquery's static link, and for the libc compatibility caveats."
+          } > notes.md
+          gh release create "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$GITHUB_REF_NAME" \
+            --notes-file notes.md \
+            assets/*.tar.zst assets/SHA256SUMS
+
+      - name: Upload checksums as workflow artifact (non-tag runs)
+        if: github.ref_type != 'tag'
+        uses: actions/upload-artifact@v4
+        with:
+          name: SHA256SUMS
+          path: assets/SHA256SUMS

@@ -1,0 +1,47 @@
+# Bazel module that builds the GoogleSQL C shim smallquery needs, as static
+# archives, so that CI can publish prebuilt artifacts and smallquery builds
+# can download them instead of running the full Bazel C++ build.
+#
+# The shim sources under shim/ originate from fornwall/smallquery,
+# crates/googlesql-sys/shim (the PR #91 / agent/alwayslink-split state).
+#
+# Note: //googlesql/local_service is package-private to //googlesql/...,
+# so building the shim requires --check_visibility=false (set in .bazelrc).
+
+module(
+    name = "googlesql_shim",
+    version = "0.1.0",
+)
+
+# GoogleSQL itself, pinned to the exact commit of the fornwall/googlesql fork
+# (the evaluator-split branch) that smallquery's vendor/googlesql submodule
+# points at. An override ignores the registry, so the version below only has
+# to match the MODULE.bazel inside the archive.
+bazel_dep(name = "googlesql", version = "2026.7.4")
+archive_override(
+    module_name = "googlesql",
+    integrity = "sha256-UuwDbRBeOFPWUyE5B1TfPpKqy3Y0DTONGwTUtLZ61t4=",
+    strip_prefix = "googlesql-8d06b161dfd9fcbc69ab9765713ad817ebc31104",
+    urls = ["https://github.com/fornwall/googlesql/archive/8d06b161dfd9fcbc69ab9765713ad817ebc31104.tar.gz"],
+)
+
+# Only what the shim itself references. protobuf is deliberately not declared:
+# it arrives transitively via local_service_cc_proto, and pinning it here just
+# creates version conflicts with whatever GoogleSQL resolves to.
+bazel_dep(name = "abseil-cpp", version = "20260107.0", repo_name = "com_google_absl")
+bazel_dep(name = "rules_cc", version = "0.2.17")
+
+# Cold-build speed: use the host's `make` and `pkg-config` to drive ICU's
+# `configure_make`, instead of letting rules_foreign_cc build both tools from
+# source first (those two bootstraps sit on the build's serial critical path
+# ahead of ICU and every GoogleSQL compile that needs ICU's headers; ICU
+# builds byte-identically either way). Declared at 0.15.0 to match what
+# GoogleSQL already resolves to (MVS keeps them the same repo); a root-module
+# register_toolchains outranks the `built_*` toolchains rules_foreign_cc
+# registers by default. Requires `make` and `pkg-config` on PATH -- as this
+# build already requires a system Clang (CC/CXX from the environment).
+bazel_dep(name = "rules_foreign_cc", version = "0.15.0")
+register_toolchains(
+    "@rules_foreign_cc//toolchains:preinstalled_make_toolchain",
+    "@rules_foreign_cc//toolchains:preinstalled_pkgconfig_toolchain",
+)
