@@ -68,7 +68,7 @@ jobs:
             /usr/share/swift "$AGENT_TOOLSDIRECTORY"
           df -h /
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Verify the pinned GoogleSQL commit matches MODULE.bazel
         run: grep -q "$GOOGLESQL_COMMIT" MODULE.bazel
@@ -190,7 +190,7 @@ jobs:
           tar -cf - -C dist . | zstd -T0 -12 -o "$name.tar.zst"
           ls -la "$name.tar.zst"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: googlesql-shim-${{ matrix.triple }}
           path: "*.tar.zst"
@@ -204,7 +204,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - name: Download platform tarballs
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: assets
           pattern: googlesql-shim-*
@@ -240,7 +240,7 @@ jobs:
 
       - name: Upload checksums as workflow artifact (non-tag runs)
         if: github.ref_type != 'tag'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: SHA256SUMS
           path: assets/SHA256SUMS
