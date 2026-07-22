@@ -1,0 +1,61 @@
+name: DCO
+
+on:
+  pull_request:
+
+permissions: {}
+
+jobs:
+  # Every PR commit must carry a `Signed-off-by:` trailer matching the commit
+  # author, per CONTRIBUTING.md. A hand-rolled check rather than the DCO
+  # GitHub App or a marketplace action: it is ~20 lines of git, needs no
+  # third-party code, and fails with a message that says which commit and how
+  # to fix it.
+  signoff:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # The whole PR range is inspected, so shallow history is not enough.
+          fetch-depth: 0
+      - name: Check Signed-off-by on every PR commit
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          failed=0
+          for sha in $(git rev-list --no-merges "$BASE_SHA..$HEAD_SHA"); do
+            author="$(git show -s --format='%an <%ae>' "$sha")"
+            signers="$(git show -s \
+              --format='%(trailers:key=Signed-off-by,valueonly)' "$sha")"
+            # The Linux kernel's coding-assistants rule, mechanized: only
+            # humans certify the DCO, so an AI tool's identity may appear in
+            # Co-Authored-By/Assisted-by trailers but must be neither the
+            # commit author nor a Signed-off-by signer. Checked before the
+            # bot exemption below so an AI agent named *[bot] cannot slip
+            # through it. Extend the list as tools appear.
+            case "$author $signers" in
+              *noreply@anthropic.com*|*Copilot@users.noreply.github.com*|*copilot-swe-agent*)
+                echo "::error::Commit $sha has an AI tool as author or DCO" \
+                     "signer ($author). Only humans certify the DCO; credit" \
+                     "AI assistance with a Co-Authored-By trailer instead."
+                failed=1
+                continue;;
+            esac
+            # Platform automation (dependabot and the like) cannot certify
+            # the DCO and is not expected to; like the probot DCO app,
+            # exempt GitHub App identities from the sign-off requirement.
+            case "$author" in
+              *"[bot]"*) continue;;
+            esac
+            if ! grep -qxF "$author" <<<"$signers"; then
+              echo "::error::Commit $sha lacks 'Signed-off-by: $author'."
+              failed=1
+            fi
+          done
+          if [ "$failed" -ne 0 ]; then
+            echo "Sign off with 'git commit -s'; to fix existing commits, run" \
+                 "'git rebase --signoff origin/main' and force-push." \
+                 "See CONTRIBUTING.md."
+            exit 1
+          fi
