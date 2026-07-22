@@ -51,14 +51,15 @@ jobs:
           - triple: aarch64-apple-darwin
             os: macos-15
             kind: darwin
-            bazel_flags: ""
-          # Cross-compiled from the arm64 runner. ICU's configure runs its
-          # compile-and-execute probes as x86_64 binaries, which the runner
-          # executes through Rosetta 2.
+          # Native build on the Intel runner. A --cpu=darwin_x86_64
+          # cross-compile from the arm64 runner was tried first and silently
+          # produced arm64 objects (the generic Unix toolchain ignores the
+          # legacy flag; the verify step's lipo check caught it) -- proper
+          # cross would mean adopting apple_support's toolchain, which
+          # conflicts with pinning Homebrew LLVM.
           - triple: x86_64-apple-darwin
-            os: macos-15
+            os: macos-15-intel
             kind: darwin
-            bazel_flags: "--cpu=darwin_x86_64"
     runs-on: ${{ matrix.os }}
     timeout-minutes: 120
     steps:
@@ -147,7 +148,7 @@ jobs:
           SDKROOT="$(xcrun --show-sdk-path)"
           export SDKROOT
           bazel --version
-          bazel build -c opt --force_pic ${{ matrix.bazel_flags }} \
+          bazel build -c opt --force_pic \
             --repo_env=CC="$LLVM_PREFIX/bin/clang" \
             --repo_env=CXX="$LLVM_PREFIX/bin/clang++" \
             --repo_env=SDKROOT="$SDKROOT" \
@@ -207,7 +208,7 @@ jobs:
             echo "package: $name"
             echo "source: fornwall/googlesql-shim@$GITHUB_SHA"
             echo "googlesql: fornwall/googlesql@$GOOGLESQL_COMMIT"
-            echo "build: bazel build -c opt --force_pic ${{ matrix.bazel_flags }} //shim:static"
+            echo "build: bazel build -c opt --force_pic //shim:static"
             cat dist/toolchain.txt
           } > dist/BUILDINFO.txt
           rm dist/toolchain.txt

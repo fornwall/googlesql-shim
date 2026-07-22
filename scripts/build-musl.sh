@@ -23,8 +23,7 @@
 # empty version segment.
 set -eux
 
-apk add --no-cache clang make pkgconf python3 zstd bash linux-headers \
-  build-base
+apk add --no-cache clang bash linux-headers build-base
 apk add --no-cache bazel8 \
   --repository=https://dl-cdn.alpinelinux.org/alpine/edge/testing
 

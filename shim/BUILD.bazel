@@ -8,7 +8,7 @@
 
 load("@rules_cc//cc:cc_static_library.bzl", "cc_static_library")
 load("@rules_cc//cc:defs.bzl", "cc_library")
-load(":link_extras.bzl", "cc_alwayslink_objects", "cc_link_extras")
+load(":link_extras.bzl", "cc_alwayslink_objects")
 
 cc_library(
     name = "shim_lib",
@@ -91,14 +91,28 @@ cc_alwayslink_objects(
     deps = [":shim_lib"],
 )
 
-# ICU is built by rules_foreign_cc, so it hands Bazel four finished `.a` files
-# and no object files -- which means `cc_static_library` leaves it out. These
-# are staged beside the bundle so one `-L` covers the whole link.
-cc_link_extras(
-    name = "googlesql_shim_extras",
-    visibility = ["//visibility:public"],
-    deps = [":shim_lib"],
-)
+# ICU ships as four separate archives beside the bundle, exactly the set the
+# old rules_foreign_cc build published -- smallquery's build.rs links every
+# lib*.a it finds next to the bundle, so the staged names are the contract.
+# They stay out of the bundle by construction: GoogleSQL compiles against
+# @icu's headers-only targets, so no ICU object ever enters the shim's
+# linking context; the code and data archives are built separately in
+# @icu (see third_party/icu/icu.BUILD) and copied into this package so
+# every consumer finds the whole set under one directory.
+[
+    genrule(
+        name = "stage_" + lib,
+        srcs = ["@icu//:" + lib],
+        outs = ["lib" + lib + ".a"],
+        cmd = "cp $< $@",
+    )
+    for lib in [
+        "icuuc",
+        "icui18n",
+        "icuio",
+        "icudata",
+    ]
+]
 
 # What a release is built from:
 #   bazel build -c opt --force_pic //shim:static
@@ -110,7 +124,10 @@ filegroup(
     srcs = [
         ":googlesql_shim",
         ":googlesql_shim_alwayslink",
-        ":googlesql_shim_extras",
+        ":stage_icudata",
+        ":stage_icui18n",
+        ":stage_icuio",
+        ":stage_icuuc",
     ],
     visibility = ["//visibility:public"],
 )

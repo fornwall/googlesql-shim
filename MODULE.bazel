@@ -48,18 +48,31 @@ single_version_override(
     version = "1.6.1",
 )
 
-# Cold-build speed: use the host's `make` and `pkg-config` to drive ICU's
-# `configure_make`, instead of letting rules_foreign_cc build both tools from
-# source first (those two bootstraps sit on the build's serial critical path
-# ahead of ICU and every GoogleSQL compile that needs ICU's headers; ICU
-# builds byte-identically either way). Declared at 0.15.0 to match what
-# GoogleSQL already resolves to (MVS keeps them the same repo); a root-module
-# register_toolchains outranks the `built_*` toolchains rules_foreign_cc
-# registers by default. Requires `make` and `pkg-config` on PATH -- as this
-# build already requires a system Clang (CC/CXX from the environment).
-bazel_dep(name = "rules_foreign_cc", version = "0.15.0")
+# ICU, built natively by Bazel instead of GoogleSQL's rules_foreign_cc
+# (autotools) build: the same icu4c release GoogleSQL pins, under our own
+# BUILD file (third_party/icu/icu.BUILD, which also embeds the release's
+# prebuilt ICU data statically), swapped into GoogleSQL's extension with
+# override_repo below. Autotools was the only configure_make target in the
+# graph and the first thing to break on every non-Linux platform. The
+# release's own BUILD.bazel files must go, exactly as GoogleSQL's original
+# http_archive deleted them: they would become subpackages and hide the
+# sources from our globs (patch_cmds_win keeps the deletion working on
+# Windows).
+http_archive = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
 
-register_toolchains(
-    "@rules_foreign_cc//toolchains:preinstalled_make_toolchain",
-    "@rules_foreign_cc//toolchains:preinstalled_pkgconfig_toolchain",
+http_archive(
+    name = "icu",
+    build_file = "//third_party/icu:icu.BUILD",
+    patch_cmds = ["find source -name BUILD.bazel -delete"],
+    patch_cmds_win = ["Get-ChildItem -Path source -Recurse -Filter BUILD.bazel | Remove-Item"],
+    sha256 = "dfacb46bfe4747410472ce3e1144bf28a102feeaa4e3875bac9b4c6cf30f4f3e",
+    strip_prefix = "icu",
+    urls = ["https://github.com/unicode-org/icu/releases/download/release-76-1/icu4c-76_1-src.tgz"],
+)
+
+googlesql_http_archive_deps = use_extension("@googlesql//bazel:http_archive_deps.bzl", "googlesql_http_archive_deps")
+
+override_repo(
+    googlesql_http_archive_deps,
+    icu = "icu",
 )

@@ -1,0 +1,10 @@
+# Support files for the native ICU build; the BUILD file applied to the
+# @icu repo itself is icu.BUILD (see MODULE.bazel).
+
+load("@rules_python//python:defs.bzl", "py_binary")
+
+py_binary(
+    name = "dat_to_c",
+    srcs = ["dat_to_c.py"],
+    visibility = ["//visibility:public"],
+)
