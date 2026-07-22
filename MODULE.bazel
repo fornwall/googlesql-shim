@@ -29,6 +29,10 @@ archive_override(
 # it arrives transitively via local_service_cc_proto, and pinning it here just
 # creates version conflicts with whatever GoogleSQL resolves to.
 bazel_dep(name = "abseil-cpp", version = "20260107.0", repo_name = "com_google_absl")
+
+# The @icu repo's BUILD file select()s on @platforms//os:windows, and a repo
+# created by the root module only sees the root's direct deps.
+bazel_dep(name = "platforms", version = "1.0.0")
 bazel_dep(name = "rules_cc", version = "0.2.17")
 
 # Declared directly (same version GoogleSQL resolves to) so the root module
