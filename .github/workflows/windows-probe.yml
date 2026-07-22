@@ -39,4 +39,4 @@ jobs:
         shell: pwsh
         run: |
           bazel --version
-          bazel --ignore_all_rc_files build -c opt --check_visibility=false --incompatible_autoload_externally=+ProtoInfo,+CcInfo,+JavaInfo,+JavaPluginInfo,+proto_library,+cc_library,+cc_binary,+cc_test,+cc_import,+cc_proto_library,+cc_shared_library,+java_library,+java_binary,+java_test,+java_import,+java_plugin,+java_proto_library,+java_lite_proto_library --cxxopt=/std:c++20 //shim:static
+          bazel --ignore_all_rc_files build -c opt --check_visibility=false '--incompatible_autoload_externally=+ProtoInfo,+CcInfo,+JavaInfo,+JavaPluginInfo,+proto_library,+cc_library,+cc_binary,+cc_test,+cc_import,+cc_proto_library,+cc_shared_library,+java_library,+java_binary,+java_test,+java_import,+java_plugin,+java_proto_library,+java_lite_proto_library' --cxxopt=/std:c++20 //shim:static
