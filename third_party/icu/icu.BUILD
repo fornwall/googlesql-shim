@@ -124,23 +124,30 @@ cc_library(
 
 # One flattened archive per component, named so the staging genrules in the
 # consuming workspace produce the exact libicu*.a set the autotools build
-# published.
+# published. symbol_check is off as it is for the shim bundle: Alpine's
+# Bazel 8 toolchain flags duplicate weak/COMDAT definitions that the same
+# archives pass under Bazel 9's validation, and the linker resolves such
+# duplicates by ordinary member selection anyway.
 cc_static_library(
     name = "icuuc",
+    features = ["-symbol_check"],
     deps = [":icuuc_lib"],
 )
 
 cc_static_library(
     name = "icui18n",
+    features = ["-symbol_check"],
     deps = [":icui18n_lib"],
 )
 
 cc_static_library(
     name = "icuio",
+    features = ["-symbol_check"],
     deps = [":icuio_lib"],
 )
 
 cc_static_library(
     name = "icudata",
+    features = ["-symbol_check"],
     deps = [":icudata_lib"],
 )
