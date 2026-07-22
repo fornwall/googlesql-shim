@@ -34,11 +34,17 @@ cp -r /src /work
 cd /work
 rm -rf bazel-* dist
 
+# py_linux_libc picks the musl runtime for the py_binary generators'
+# toolchain resolution (its default is glibc, whose python cannot exec
+# here); the RULES_PYTHON_REPO_TOOLCHAIN_* vars do the same for the
+# version-agnostic *host* interpreter that evaluates pip requirement
+# markers.
 bazel build -c opt --force_pic \
   --repo_env=CC=/usr/bin/clang \
   --repo_env=CXX=/usr/bin/clang++ \
   --repo_env=RULES_PYTHON_REPO_TOOLCHAIN__LINUX_X86_64=x86_64-unknown-linux-musl \
   --repo_env=RULES_PYTHON_REPO_TOOLCHAIN__LINUX_AARCH64=aarch64-unknown-linux-musl \
+  --@rules_python//python/config_settings:py_linux_libc=musl \
   //shim:static
 
 cp -L bazel-bin/shim/libgooglesql_shim.a \

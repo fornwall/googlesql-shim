@@ -83,6 +83,11 @@ jobs:
             Write-Host "---- $($_.FullName)"
             Get-Content $_.FullName -Tail 120
           }
+          Write-Host "== configure's own config.log tail:"
+          Get-Content -ErrorAction SilentlyContinue "$icu.build_tmpdir\config.log" -Tail 80
+          Write-Host "== assembled source tree (LinkType reveals symlink flavor):"
+          Get-ChildItem -ErrorAction SilentlyContinue "$icu.build_tmpdir\icu" | Select-Object Name, LinkType | Format-Table
+          Get-ChildItem -ErrorAction SilentlyContinue "$icu.build_tmpdir\icu\source" | Select-Object -First 30 Name, LinkType | Format-Table
           $ext = bazel --ignore_all_rc_files info output_base
           Write-Host "== fetched ICU source dir (aux files present?):"
           Get-ChildItem -ErrorAction SilentlyContinue "$ext\external\googlesql++googlesql_http_archive_deps+icu\source" | Select-Object -First 40 -ExpandProperty Name
