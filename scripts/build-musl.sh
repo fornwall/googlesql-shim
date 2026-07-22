@@ -31,7 +31,10 @@
 #   aarch64-musl interpreter.
 set -eux
 
-apk add --no-cache clang bash linux-headers build-base
+# python3 stays: py_binary tools in the exec configuration resolve to
+# Bazel's autodetecting toolchain (env python3) when no hermetic runtime
+# matches the exec platform.
+apk add --no-cache clang bash linux-headers build-base python3
 apk add --no-cache bazel8 \
   --repository=https://dl-cdn.alpinelinux.org/alpine/edge/testing
 
