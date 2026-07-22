@@ -1,0 +1,6 @@
+# actionlint v1.7.7 (pinned in ci.yml) predates GitHub's arm64 Windows
+# runners, so its built-in runner-label list rejects the real label used by
+# windows-probe.yml. Declaring it here whitelists it.
+self-hosted-runner:
+  labels:
+    - windows-11-arm
