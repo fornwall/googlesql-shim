@@ -109,6 +109,13 @@ build:ubsan --linkopt=-fsanitize=undefined
 # WebAssembly (experimental)
 # --------------------------
 # `--config=wasm` targets wasm32-unknown-emscripten via the emsdk Bazel
-# toolchain declared in MODULE.bazel. Compilation-only so far: see the PR /
-# branch notes for what builds and what is blocked.
+# toolchain declared in MODULE.bazel. See wasm/README.md.
 build:wasm --platforms=@emsdk//:platform_wasm
+
+# The build:linux section above keys on the *host* OS, so its GNU-ld link
+# flags (--no-as-needed, -l:libstdc++.so.6) would land on wasm-ld's command
+# line, which understands neither. Platform-specific config expansion happens
+# after explicit --config flags, so turning it off here suppresses build:linux
+# for wasm builds only; the flags it carries exist for ICU's configure_make
+# link, which the wasm leg does not run (wasm/icu.BUILD).
+common:wasm --enable_platform_specific_config=false

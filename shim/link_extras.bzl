@@ -79,6 +79,16 @@ def _cc_alwayslink_objects_impl(ctx):
     ctx.actions.run(
         executable = archiver,
         arguments = [args],
+        # The toolchain's own environment for this action: some archivers are
+        # wrapper scripts that need it (emsdk's emar.sh resolves the real
+        # emar.py through EM_BIN_PATH/EM_CONFIG_PATH/BAZEL_PYTHON_RELPATH).
+        # Empty for toolchains that declare none, so native links are
+        # unchanged.
+        env = cc_common.get_environment_variables(
+            feature_configuration = feature_configuration,
+            action_name = ACTION_NAMES.cpp_link_static_library,
+            variables = cc_common.empty_variables(),
+        ),
         inputs = depset(objects, transitive = [cc_toolchain.all_files]),
         outputs = [out],
         mnemonic = "AlwayslinkArchive",
