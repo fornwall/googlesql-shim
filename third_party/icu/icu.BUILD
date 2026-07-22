@@ -22,6 +22,14 @@ load("@rules_cc//cc:defs.bzl", "cc_library")
 
 package(default_visibility = ["//visibility:public"])
 
+# MSVC parses ICU's u'x' char16_t literals as multi-character constants
+# unless the source charset is pinned to UTF-8 (error C2015 in
+# static_unicode_sets.h); clang and gcc already assume UTF-8.
+_PLATFORM_COPTS = select({
+    "@platforms//os:windows": ["/utf-8"],
+    "//conditions:default": [],
+})
+
 exports_files(["LICENSE"])
 
 # What consumers compile against: the public headers of the three code
@@ -74,7 +82,7 @@ cc_library(
 cc_library(
     name = "icuuc_lib",
     srcs = glob(["source/common/*.cpp"]),
-    copts = ["-DU_COMMON_IMPLEMENTATION"],
+    copts = ["-DU_COMMON_IMPLEMENTATION"] + _PLATFORM_COPTS,
     linkstatic = True,
     deps = [":internal_headers"],
 )
@@ -82,7 +90,7 @@ cc_library(
 cc_library(
     name = "icui18n_lib",
     srcs = glob(["source/i18n/*.cpp"]),
-    copts = ["-DU_I18N_IMPLEMENTATION"],
+    copts = ["-DU_I18N_IMPLEMENTATION"] + _PLATFORM_COPTS,
     linkstatic = True,
     deps = [":internal_headers"],
 )
@@ -90,7 +98,7 @@ cc_library(
 cc_library(
     name = "icuio_lib",
     srcs = glob(["source/io/*.cpp"]),
-    copts = ["-DU_IO_IMPLEMENTATION"],
+    copts = ["-DU_IO_IMPLEMENTATION"] + _PLATFORM_COPTS,
     linkstatic = True,
     deps = [":internal_headers"],
 )

@@ -122,11 +122,19 @@ jobs:
       # runs GoogleSQL's code generators and contributes nothing to the
       # archives). The container follows the runner's architecture, so the
       # same script serves x86_64 and aarch64.
+      # x86_64 builds on stable Alpine; aarch64 needs a digest-pinned edge
+      # image because no rules_python version ships an aarch64-musl CPython,
+      # so the glibc interpreter must run under gcompat + edge's musl (see
+      # scripts/build-musl.sh for the full story).
       - name: Build (linux-musl, in an Alpine container)
         if: matrix.kind == 'linux-musl'
         run: |
+          case "${{ matrix.triple }}" in
+            aarch64-*) img="alpine:edge@sha256:9a341ff2287c54b86425cbee0141114d811ae69d88a36019087be6d896cef241" ;;
+            *)         img="alpine:3.23" ;;
+          esac
           mkdir dist
-          docker run --rm -v "$PWD":/src:ro -v "$PWD/dist":/out alpine:3.23 \
+          docker run --rm -v "$PWD":/src:ro -v "$PWD/dist":/out "$img" \
             sh /src/scripts/build-musl.sh
           sudo chown -R "$(id -u):$(id -g)" dist
           df -h /
