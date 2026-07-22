@@ -105,3 +105,10 @@ build:ubsan --platform_suffix=-ubsan
 build:ubsan --copt=-fsanitize=undefined
 build:ubsan --copt=-fno-sanitize-recover=all
 build:ubsan --linkopt=-fsanitize=undefined
+
+# WebAssembly (experimental)
+# --------------------------
+# `--config=wasm` targets wasm32-unknown-emscripten via the emsdk Bazel
+# toolchain declared in MODULE.bazel. Compilation-only so far: see the PR /
+# branch notes for what builds and what is blocked.
+build:wasm --platforms=@emsdk//:platform_wasm

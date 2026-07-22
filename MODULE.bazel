@@ -62,6 +62,15 @@ bazel_dep(name = "protobuf", version = "33.4", repo_name = "com_google_protobuf"
 bazel_dep(name = "platforms", version = "1.0.0")
 bazel_dep(name = "rules_cc", version = "0.2.17")
 
+# WebAssembly experiment (--config=wasm): the Emscripten SDK's official Bazel
+# toolchain, fetched by Bazel itself (no local emsdk install). Its MODULE
+# registers cc-toolchain-wasm-* toolchains that resolve only when the target
+# platform is @emsdk//:platform_wasm, so it never disturbs native builds. The
+# wasm leg needs no ICU override of its own: the native third_party/icu build
+# below is already plain cc_library (no configure_make), so it cross-compiles
+# to emscripten unchanged. See wasm/README.md.
+bazel_dep(name = "emsdk", version = "6.0.3")
+
 # Declared directly (same version GoogleSQL resolves to) so the root module
 # can reference @rules_python//python/config_settings:py_linux_libc on the
 # musl legs' command line. Plus one patch: the
