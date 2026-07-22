@@ -4,16 +4,30 @@
 # platform table in the README for the current status. If a full build here
 # ever goes green, promote the leg into release.yml.
 #
-# Findings so far (dispatch runs, newest last):
-# - x86_64: the tree analyzes and the build starts under MSVC, but ICU's
-#   configure_make (rules_foreign_cc, git-bash) dies with "cannot find
-#   required auxiliary files: install-sh config.guess config.sub".
-# - aarch64: fails earlier -- GoogleSQL's pip module extension
-#   (rules_python) cannot provide a hermetic interpreter for windows-arm64,
-#   so analysis aborts before any C++ is attempted.
+# Findings (dispatch runs, newest last):
+# - x86_64, build-system blockers -- ALL CLEARED:
+#   * ICU's autotools build under rules_foreign_cc was the original wall;
+#     it is gone entirely, replaced by the native Bazel ICU build
+#     (third_party/icu). @icu//:icuuc and @icu//:icudata now compile clean
+#     under MSVC (icuuc needed /utf-8 for its char16_t literals).
+#   * MAX_PATH overflow (cl.exe D8022 on a .obj.params file) -- fixed with
+#     --output_base=C:/_b.
+# - x86_64, current wall -- GoogleSQL SOURCE, not the build system: with
+#   everything above cleared the build gets through all of Abseil/protobuf
+#   and ~1800/2700 targets into GoogleSQL, then hits
+#   googlesql/base/logging.cc's `#include <libgen.h>` (POSIX basename(),
+#   absent on Windows and supplied by no compiler flag). thread_stack.cc
+#   and others carry further unistd/pthread dependencies behind it. These
+#   are upstream GoogleSQL portability gaps -- fixing them means patching
+#   fornwall/googlesql, out of scope for a build-config repo -- so this is
+#   the documented stopping point for x86_64 Windows.
+# - aarch64: fails even earlier and for an unrelated reason -- GoogleSQL's
+#   pip module extension (rules_python) has no hermetic interpreter for
+#   windows-arm64, so analysis aborts before any C++; past that it shares
+#   x86_64's source-level wall.
 #
-# The `target` input keeps iterations cheap: probe the first failing target
-# (e.g. just the ICU repo) rather than the whole shim, then graduate.
+# The `target` input keeps iterations cheap: probe one library (e.g.
+# @icu//:icuuc) rather than the whole shim, then graduate to //shim:static.
 
 name: windows-probe
 

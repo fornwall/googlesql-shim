@@ -26,8 +26,8 @@ smallquery's `vendor/googlesql` submodule points at.
 | `aarch64-linux-musl` | released | Digest-pinned Alpine edge container on the arm64 runner (stable is not possible yet: no rules_python release ships an aarch64-musl CPython, so the generators' glibc interpreter needs gcompat + edge musl) |
 | `aarch64-apple-darwin` | released | `macos-15` runner, Homebrew llvm (same pinned major) |
 | `x86_64-apple-darwin` | released | `macos-15-intel` runner, same recipe (a `--cpu=darwin_x86_64` cross-compile from arm64 silently produced arm64 objects — the generic Unix toolchain ignores the legacy flag — so the leg builds natively) |
-| `x86_64-pc-windows` | not built | The historical blocker (ICU's autotools build under MSYS) is gone with the native ICU build below; GoogleSQL's own MSVC portability is the open question, iterated in `.github/workflows/windows-probe.yml` |
-| `aarch64-pc-windows` | not built | Blocked before the C++ even starts: rules_python has no hermetic CPython for windows-arm64, so GoogleSQL's pip extension fails analysis; after that it shares the x86_64 unknowns |
+| `x86_64-pc-windows` | not built (source-level blocker) | Every *build-system* blocker is cleared — the native ICU build compiles clean under MSVC and the MAX_PATH overflow is fixed — so the build now runs through Abseil, protobuf and ~1800/2700 targets into GoogleSQL, then stops at GoogleSQL's own POSIX source dependencies (`googlesql/base/logging.cc` includes `<libgen.h>` for `basename()`, with `unistd`/`pthread` uses behind it). Fixing those means patching GoogleSQL upstream, out of scope here. See `.github/workflows/windows-probe.yml`. |
+| `aarch64-pc-windows` | not built | Fails even earlier: rules_python has no hermetic CPython for windows-arm64, so GoogleSQL's pip extension aborts analysis before any C++; past that it shares the x86_64 source-level blocker |
 
 ## What a release contains
 
