@@ -1,42 +1,64 @@
 # A deliberately separate, manual probe of Windows support -- NOT part of the
 # release pipeline. Upstream GoogleSQL (ZetaSQL lineage) has never supported
-# MSVC/Windows: POSIX assumptions run through the tree, the local_service
-# build uses flex/bison outputs and pthreads, and ICU is built via
-# rules_foreign_cc's configure_make, which needs a POSIX shell. This workflow
-# exists to document that empirically rather than by assertion; see the
-# platform table in the README for the current status. If a run of this ever
-# goes green, promote the leg into release.yml.
+# MSVC/Windows, so this iterates on the blockers one at a time; see the
+# platform table in the README for the current status. If a full build here
+# ever goes green, promote the leg into release.yml.
+#
+# Findings so far (dispatch runs, newest last):
+# - x86_64: the tree analyzes and the build starts under MSVC, but ICU's
+#   configure_make (rules_foreign_cc, git-bash) dies with "cannot find
+#   required auxiliary files: install-sh config.guess config.sub".
+# - aarch64: fails earlier -- GoogleSQL's pip module extension
+#   (rules_python) cannot provide a hermetic interpreter for windows-arm64,
+#   so analysis aborts before any C++ is attempted.
+#
+# The `target` input keeps iterations cheap: probe the first failing target
+# (e.g. just the ICU repo) rather than the whole shim, then graduate.
 
 name: windows-probe
 
 on:
   workflow_dispatch:
+    inputs:
+      os:
+        description: Runner to probe
+        type: choice
+        default: windows-latest
+        options:
+          - windows-latest
+          - windows-11-arm
+      target:
+        description: Bazel target to build
+        default: "@@googlesql++googlesql_http_archive_deps+icu//:icu"
+      use_msys2:
+        description: Point BAZEL_SH at the image's MSYS2 bash (with autotools installed) instead of git-bash
+        type: boolean
+        default: true
 
 permissions:
   contents: read
 
 jobs:
   probe:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - triple: x86_64-pc-windows
-            os: windows-latest
-          - triple: aarch64-pc-windows
-            os: windows-11-arm
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 60
+    runs-on: ${{ inputs.os }}
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
 
-      # pwsh rather than bash: git-bash's MSYS path conversion mangles the
-      # //shim:static label into /shim:static before Bazel sees it.
-      # The checked-in .bazelrc carries clang/GNU flags that MSVC would
-      # reject before the real portability problems even surface, so the
-      # probe bypasses rc files and passes the minimal equivalents.
+      - name: Install MSYS2 autotools and point Bazel at its bash
+        if: inputs.use_msys2
+        shell: pwsh
+        run: |
+          C:\msys64\usr\bin\pacman.exe -S --noconfirm --needed autoconf automake libtool make pkgconf
+          Add-Content $env:GITHUB_ENV "BAZEL_SH=C:\msys64\usr\bin\bash.exe"
+
+      # pwsh rather than bash: git-bash's MSYS path conversion mangles
+      # //-prefixed labels. The checked-in .bazelrc carries clang/GNU flags
+      # that MSVC would reject before the real portability problems even
+      # surface, so the probe bypasses rc files and passes the minimal
+      # equivalents.
       - name: Probe the build
         shell: pwsh
         run: |
           bazel --version
-          bazel --ignore_all_rc_files build -c opt --check_visibility=false '--incompatible_autoload_externally=+ProtoInfo,+CcInfo,+JavaInfo,+JavaPluginInfo,+proto_library,+cc_library,+cc_binary,+cc_test,+cc_import,+cc_proto_library,+cc_shared_library,+java_library,+java_binary,+java_test,+java_import,+java_plugin,+java_proto_library,+java_lite_proto_library' --cxxopt=/std:c++20 //shim:static
+          bazel --ignore_all_rc_files build -c opt --check_visibility=false '--incompatible_autoload_externally=+ProtoInfo,+CcInfo,+JavaInfo,+JavaPluginInfo,+proto_library,+cc_library,+cc_binary,+cc_test,+cc_import,+cc_proto_library,+cc_shared_library,+java_library,+java_binary,+java_test,+java_import,+java_plugin,+java_proto_library,+java_lite_proto_library' --cxxopt=/std:c++20 '${{ inputs.target }}'
