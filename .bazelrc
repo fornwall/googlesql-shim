@@ -66,3 +66,42 @@ build --check_visibility=false
 # links gRPC. Enabling autoload drops every native rule not listed, hence the
 # full set rather than just ProtoInfo.
 common --incompatible_autoload_externally=+ProtoInfo,+CcInfo,+JavaInfo,+JavaPluginInfo,+proto_library,+cc_library,+cc_binary,+cc_test,+cc_import,+cc_proto_library,+cc_shared_library,+java_library,+java_binary,+java_test,+java_import,+java_plugin,+java_proto_library,+java_lite_proto_library
+
+# Sanitizers
+# ----------
+# For the C++-side safeguards on the callback-catalog path (must be built
+# with Clang -- pass CC/CXX on the command line as above):
+#   bazel test --config=asan  //shim:shim_callback_test
+#   bazel test --config=tsan  //shim:shim_callback_test
+#   bazel test --config=ubsan //shim:shim_callback_test
+# Each config is its own Bazel configuration, so the first build recompiles
+# the whole GoogleSQL dependency tree under that sanitizer (tens of minutes
+# cold; cached afterwards). `--experimental_convenience_symlinks=ignore`
+# keeps bazel-bin and friends pointing at the default build's artifacts -- a
+# sanitizer build must never silently repoint them.
+build:sanitizer-common --strip=never
+build:sanitizer-common --copt=-g
+build:sanitizer-common --copt=-O1
+build:sanitizer-common --copt=-fno-omit-frame-pointer
+build:sanitizer-common --experimental_convenience_symlinks=ignore
+
+# `--platform_suffix` gives each sanitizer its own output tree: plain --copt
+# changes do not change the output directory, so without it each config
+# rebuilds *in place*, clobbering the default artifacts and forcing a full
+# recompile on the way back (measured, in smallquery: the first sanitizer run
+# rebuilt ~1.7k actions it did not need to).
+build:asan --config=sanitizer-common
+build:asan --platform_suffix=-asan
+build:asan --copt=-fsanitize=address
+build:asan --linkopt=-fsanitize=address
+
+build:tsan --config=sanitizer-common
+build:tsan --platform_suffix=-tsan
+build:tsan --copt=-fsanitize=thread
+build:tsan --linkopt=-fsanitize=thread
+
+build:ubsan --config=sanitizer-common
+build:ubsan --platform_suffix=-ubsan
+build:ubsan --copt=-fsanitize=undefined
+build:ubsan --copt=-fno-sanitize-recover=all
+build:ubsan --linkopt=-fsanitize=undefined

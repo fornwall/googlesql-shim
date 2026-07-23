@@ -19,8 +19,8 @@
 #include <cstring>
 #include <string>
 
-#include "absl/strings/str_cat.h"
 #include "absl/strings/match.h"
+#include "absl/strings/str_cat.h"
 #include "googlesql/local_service/local_service.pb.h"
 #include "googlesql/public/civil_time.h"
 #include "googlesql/public/options.pb.h"

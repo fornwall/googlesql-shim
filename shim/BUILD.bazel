@@ -7,7 +7,7 @@
 # crates/googlesql-sys/shim.
 
 load("@rules_cc//cc:cc_static_library.bzl", "cc_static_library")
-load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
+load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_library", "cc_test")
 load(":link_extras.bzl", "cc_alwayslink_objects")
 load(":proto_closure.bzl", "proto_closure")
 
@@ -84,6 +84,54 @@ cc_test(
         # GoogleSQL compiles against headers-only @icu targets (so the
         # release bundle stays ICU-free); an actual *binary* like this test
         # must therefore link the ICU code and data libraries explicitly.
+        "@icu//:icudata_lib",
+        "@icu//:icui18n_lib",
+        "@icu//:icuio_lib",
+        "@icu//:icuuc_lib",
+    ],
+)
+
+# Sanitizer-facing tests for the callback-catalog entry point, driving the C
+# ABI with C++-implemented callbacks standing in for smallquery's Rust side.
+# Run under the sanitizer configs in the root .bazelrc:
+#   bazel test --config=asan  //shim:shim_callback_test
+#   bazel test --config=tsan  //shim:shim_callback_test
+#   bazel test --config=ubsan //shim:shim_callback_test
+# Also passes (and asserts the buffer alloc/free balance) under the default
+# config. `size = "large"`: the multithreaded cases are slow under TSan.
+cc_test(
+    name = "shim_callback_test",
+    size = "large",
+    srcs = ["shim_callback_test.cc"],
+    # linkstatic + the explicit ICU deps, for the same reasons as smoke_test
+    # above: GoogleSQL compiles against headers-only @icu targets, so an
+    # actual binary must link the ICU code and data libraries itself.
+    linkstatic = True,
+    deps = [
+        ":shim_lib",
+        "@googlesql//googlesql/local_service:local_service_cc_proto",
+        "@googlesql//googlesql/proto:options_cc_proto",
+        "@googlesql//googlesql/public:options_cc_proto",
+        "@googlesql//googlesql/public:simple_table_cc_proto",
+        "@icu//:icudata_lib",
+        "@icu//:icui18n_lib",
+        "@icu//:icuio_lib",
+        "@icu//:icuuc_lib",
+    ],
+)
+
+# A differential oracle: prints (input, GoogleSQL's NumericValue::Sqrt(input))
+# pairs for smallquery's crates/smallquery/tests/numeric_sqrt_differential.rs
+# to check its Rust `numeric::sqrt` port against, bit for bit. Not part of the
+# shim or its releases; a standalone tool run by hand (`bazel run`) to
+# regenerate the test vectors. Depends only on the numeric_value library, but
+# needs the explicit ICU deps like every binary target here (see smoke_test).
+cc_binary(
+    name = "numeric_sqrt_oracle",
+    srcs = ["numeric_sqrt_oracle.cc"],
+    linkstatic = True,
+    deps = [
+        "@googlesql//googlesql/public:numeric_value",
         "@icu//:icudata_lib",
         "@icu//:icui18n_lib",
         "@icu//:icuio_lib",
