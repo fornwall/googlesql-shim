@@ -1,0 +1,2318 @@
+From 8d06b161dfd9fcbc69ab9765713ad817ebc31104 Mon Sep 17 00:00:00 2001
+From: Fredrik Fornwall <fredrik@fornwall.net>
+Date: Wed, 22 Jul 2026 19:01:26 +0200
+Subject: [PATCH] Split the local service's evaluator RPCs into their own
+ cc_library
+
+//googlesql/local_service:local_service implements all the local-service
+RPCs in one translation unit, so the Prepare/Evaluate/Unprepare RPC
+families pull //googlesql/public:evaluator -- and with it the whole
+reference implementation, including algebrizer.cc, one of the largest
+compile actions on a cold build -- into every consumer, even one that
+only parses and analyzes SQL.
+
+Split the target in two:
+
+- local_service_analysis (new): GoogleSqlLocalServiceAnalysisImpl
+  implements every RPC except the Prepare/Evaluate/Unprepare families,
+  plus the registered descriptor-pool and catalog state those families
+  share with the analysis RPCs, with no dependency on the evaluator or
+  the reference implementation.
+
+- local_service: GoogleSqlLocalServiceImpl now derives from the
+  analysis class and adds the evaluator-backed RPC families. Its API
+  and behavior are unchanged, and it remains the target the gRPC
+  server, the JNI bindings and the tests build against.
+
+Besides the shared registration state, the one coupling between the
+halves is AnalyzerOptions.use_constant_evaluator, which needs a
+PreparedExpressionConstantEvaluator (and hence the evaluator) inside
+the Analyze RPC. That is now a virtual hook: the analysis-only class
+rejects the option with kUnimplemented, and GoogleSqlLocalServiceImpl
+overrides the hook with the evaluator-backed implementation, preserving
+existing behavior for the full service.
+
+Front-end-only consumers can now depend on
+//googlesql/local_service:local_service_analysis and skip compiling the
+evaluator entirely.
+
+Signed-off-by: Fredrik Fornwall <fredrik@fornwall.net>
+---
+ googlesql/local_service/BUILD                 |  55 +-
+ googlesql/local_service/local_service.cc      | 817 +-----------------
+ googlesql/local_service/local_service.h       | 125 +--
+ .../local_service/local_service_analysis.cc   | 803 +++++++++++++++++
+ .../local_service/local_service_analysis.h    | 306 +++++++
+ 5 files changed, 1178 insertions(+), 928 deletions(-)
+ create mode 100644 googlesql/local_service/local_service_analysis.cc
+ create mode 100644 googlesql/local_service/local_service_analysis.h
+
+diff --git a/googlesql/local_service/BUILD b/googlesql/local_service/BUILD
+index 50f2aa5b6..6b7d42c7b 100644
+--- a/googlesql/local_service/BUILD
++++ b/googlesql/local_service/BUILD
+@@ -26,11 +26,16 @@ load("@rules_cc//cc:cc_test.bzl", "cc_test")
+ # GoogleSQL Server
+ package(default_visibility = ["//googlesql/base:googlesql_implementation"])
+ 
++# The analysis-only half of the local service: every RPC except the
++# Prepare/Evaluate/Unprepare families. This target deliberately does not
++# depend on //googlesql/public:evaluator or the reference implementation, so
++# consumers that only parse and analyze SQL can depend on it without
++# compiling the evaluator.
+ cc_library(
+-    name = "local_service",
+-    srcs = ["local_service.cc"],
++    name = "local_service_analysis",
++    srcs = ["local_service_analysis.cc"],
+     hdrs = [
+-        "local_service.h",
++        "local_service_analysis.h",
+         "state.h",
+     ],
+     deps = [
+@@ -50,8 +55,6 @@ cc_library(
+         "//googlesql/public:builtin_function_options",
+         "//googlesql/public:catalog",
+         "//googlesql/public:constant_evaluator",
+-        "//googlesql/public:evaluator",
+-        "//googlesql/public:evaluator_table_iterator",
+         "//googlesql/public:formatter_options",
+         "//googlesql/public:function",
+         "//googlesql/public:id_string",
+@@ -59,7 +62,6 @@ cc_library(
+         "//googlesql/public:lenient_formatter",
+         "//googlesql/public:parse_resume_location",
+         "//googlesql/public:parse_resume_location_cc_proto",
+-        "//googlesql/public:prepared_expression_constant_evaluator",
+         "//googlesql/public:simple_catalog",
+         "//googlesql/public:simple_catalog_util",
+         "//googlesql/public:simple_table_cc_proto",
+@@ -86,6 +88,47 @@ cc_library(
+     ],
+ )
+ 
++# The full local service: the analysis RPCs plus the
++# Prepare/Evaluate/Unprepare RPC families, which pull in the evaluator and
++# with it the reference implementation.
++cc_library(
++    name = "local_service",
++    srcs = ["local_service.cc"],
++    hdrs = ["local_service.h"],
++    deps = [
++        ":local_service_analysis",
++        ":local_service_cc_proto",
++        "//googlesql/base:map_util",
++        "//googlesql/base:ret_check",
++        "//googlesql/base:status",
++        "//googlesql/common:errors",
++        "//googlesql/proto:options_cc_proto",
++        "//googlesql/public:analyzer",
++        "//googlesql/public:catalog",
++        "//googlesql/public:constant_evaluator",
++        "//googlesql/public:evaluator",
++        "//googlesql/public:evaluator_table_iterator",
++        "//googlesql/public:parse_resume_location",
++        "//googlesql/public:parse_resume_location_cc_proto",
++        "//googlesql/public:prepared_expression_constant_evaluator",
++        "//googlesql/public:simple_catalog",
++        "//googlesql/public:simple_table_cc_proto",
++        "//googlesql/public:type",
++        "//googlesql/public:type_cc_proto",
++        "//googlesql/public:value",
++        "//googlesql/public:value_cc_proto",
++        "@com_google_absl//absl/cleanup",
++        "@com_google_absl//absl/container:flat_hash_set",
++        "@com_google_absl//absl/functional:bind_front",
++        "@com_google_absl//absl/memory",
++        "@com_google_absl//absl/status",
++        "@com_google_absl//absl/status:statusor",
++        "@com_google_absl//absl/strings",
++        "@com_google_absl//absl/types:optional",
++        "@com_google_protobuf//:protobuf",
++    ],
++)
++
+ cc_test(
+     name = "local_service_test",
+     srcs = ["local_service_test.cc"],
+diff --git a/googlesql/local_service/local_service.cc b/googlesql/local_service/local_service.cc
+index bb479ea8c..29baa59a9 100644
+--- a/googlesql/local_service/local_service.cc
++++ b/googlesql/local_service/local_service.cc
+@@ -16,8 +16,6 @@
+ 
+ #include "googlesql/local_service/local_service.h"
+ 
+-#include <algorithm>
+-#include <cstddef>
+ #include <cstdint>
+ #include <memory>
+ #include <optional>
+@@ -25,51 +23,29 @@
+ #include <utility>
+ #include <vector>
+ 
+-#include "google/protobuf/descriptor.pb.h"
+ #include "googlesql/common/errors.h"
+-#include "googlesql/common/proto_helper.h"
+ #include "googlesql/local_service/local_service.pb.h"
++#include "googlesql/local_service/local_service_analysis.h"
+ #include "googlesql/local_service/state.h"
+-#include "googlesql/parser/parse_tree_serializer.h"
+-#include "googlesql/parser/parser.h"
+-#include "googlesql/proto/simple_catalog.pb.h"
+ #include "googlesql/public/analyzer.h"
+-#include "googlesql/public/analyzer_output.h"
+-#include "googlesql/public/builtin_function.h"
+-#include "googlesql/public/builtin_function_options.h"
+ #include "googlesql/public/constant_evaluator.h"
+ #include "googlesql/public/evaluator.h"
+ #include "googlesql/public/evaluator_table_iterator.h"
+-#include "googlesql/public/formatter_options.h"
+-#include "googlesql/public/function.h"
+-#include "googlesql/public/id_string.h"
+-#include "googlesql/public/language_options.h"
+-#include "googlesql/public/lenient_formatter.h"
+ #include "googlesql/public/prepared_expression_constant_evaluator.h"
+-#include "googlesql/public/property_graph.h"
+ #include "googlesql/public/simple_catalog.h"
+-#include "googlesql/public/simple_catalog_util.h"
+ #include "googlesql/public/simple_table.pb.h"
+-#include "googlesql/public/sql_formatter.h"
+-#include "googlesql/public/table_from_proto.h"
+-#include "googlesql/public/table_valued_function.h"
+ #include "googlesql/public/type.h"
+ #include "googlesql/public/type.pb.h"
+ #include "googlesql/public/value.h"
+ #include "googlesql/public/value.pb.h"
+-#include "googlesql/resolved_ast/resolved_ast.h"
+-#include "googlesql/resolved_ast/resolved_node.h"
+-#include "googlesql/resolved_ast/sql_builder.h"
+ #include "absl/cleanup/cleanup.h"
+-#include "absl/container/flat_hash_map.h"
+ #include "absl/container/flat_hash_set.h"
+ #include "absl/functional/bind_front.h"
+-#include "googlesql/base/check.h"
+ #include "absl/memory/memory.h"
+ #include "absl/status/status.h"
+ #include "googlesql/base/status_macros.h"
+ #include "absl/status/statusor.h"
+-#include "absl/strings/str_cat.h"
++#include "absl/strings/ascii.h"
+ #include "absl/strings/string_view.h"
+ #include "absl/types/optional.h"
+ #include "googlesql/base/map_util.h"
+@@ -99,24 +75,6 @@ absl::Status RepeatedParametersToMap(const RepeatedPtrField<ParamT>& params,
+   return absl::OkStatus();
+ }
+ 
+-// Populate the existing pools into the map with existing indices, to make sure
+-// the serialized type will use the same indices.
+-void PopulateExistingPoolsToFileDescriptorSetMap(
+-    const std::vector<const google::protobuf::DescriptorPool*>& pools,
+-    FileDescriptorSetMap* file_descriptor_set_map) {
+-  file_descriptor_set_map->clear();
+-
+-  for (int i = 0; i < pools.size(); ++i) {
+-    std::unique_ptr<Type::FileDescriptorEntry>& entry =
+-        (*file_descriptor_set_map)[pools[i]];
+-    ABSL_CHECK_EQ(entry.get(), nullptr);
+-    entry = std::make_unique<Type::FileDescriptorEntry>();
+-    entry->descriptor_set_index = i;
+-  }
+-
+-  ABSL_CHECK_EQ(pools.size(), file_descriptor_set_map->size());
+-}
+-
+ absl::Status SerializeTypeUsingExistingPools(
+     const Type* type, const std::vector<const google::protobuf::DescriptorPool*>& pools,
+     TypeProto* type_proto) {
+@@ -166,75 +124,8 @@ absl::StatusOr<EvaluateModifyResponse::Row::Operation> SerializeModifyOperation(
+   }
+ }
+ 
+-absl::Status ResolvePropertyDefinitionsForSimpleCatalog(
+-    const AnalyzerOptions& options, SimpleCatalog& catalog,
+-    std::vector<std::unique_ptr<const AnalyzerOutput>>& artifacts) {
+-  absl::flat_hash_set<const PropertyGraph*> graphs;
+-  GOOGLESQL_RETURN_IF_ERROR(catalog.GetPropertyGraphs(&graphs));
+-  for (const PropertyGraph* graph : graphs) {
+-    GOOGLESQL_RETURN_IF_ERROR(ResolveGraphPropertyDefinitions(options.language(), graph,
+-                                                    &catalog, artifacts));
+-  }
+-  return absl::OkStatus();
+-}
+-
+ }  // namespace
+ 
+-class RegisteredDescriptorPoolState : public GenericState {
+- public:
+-  RegisteredDescriptorPoolState() = delete;
+-  RegisteredDescriptorPoolState(const RegisteredDescriptorPoolState&) = delete;
+-
+-  RegisteredDescriptorPoolState& operator=(
+-      const RegisteredDescriptorPoolState&) = delete;
+-
+-  static absl::StatusOr<std::unique_ptr<RegisteredDescriptorPoolState>> Create(
+-      const google::protobuf::FileDescriptorSet& fdset) {
+-    auto pool = std::make_unique<google::protobuf::DescriptorPool>();
+-    GOOGLESQL_RETURN_IF_ERROR(AddFileDescriptorSetToPool(&fdset, pool.get()));
+-
+-    return absl::WrapUnique(new RegisteredDescriptorPoolState(std::move(pool)));
+-  }
+-
+-  const google::protobuf::DescriptorPool* pool() {
+-    if (is_builtin_) {
+-      return google::protobuf::DescriptorPool::generated_pool();
+-    } else {
+-      return pool_.get();
+-    }
+-  }
+-
+- private:
+-  friend class RegisteredDescriptorPoolPool;
+-  class builtin_descriptor_pool_t {};
+-  explicit RegisteredDescriptorPoolState(builtin_descriptor_pool_t)
+-      : is_builtin_(true) {}
+-  explicit RegisteredDescriptorPoolState(
+-      std::unique_ptr<const google::protobuf::DescriptorPool> pool)
+-      : pool_(std::move(pool)), is_builtin_(false) {}
+-  const std::unique_ptr<const google::protobuf::DescriptorPool> pool_ = nullptr;
+-  const bool is_builtin_ = false;
+-};
+-
+-class RegisteredDescriptorPoolPool
+-    : public SharedStatePool<RegisteredDescriptorPoolState> {
+- public:
+-  RegisteredDescriptorPoolPool() {
+-    int64_t id = Register(new RegisteredDescriptorPoolState(
+-        RegisteredDescriptorPoolState::builtin_descriptor_pool_t()));
+-    ABSL_CHECK_NE(id, -1);
+-    builtin_pool_ = Get(id);
+-  }
+-
+-  std::shared_ptr<RegisteredDescriptorPoolState>
+-  GetBuiltinDescriptorPoolState() {
+-    return builtin_pool_;
+-  }
+-
+- private:
+-  std::shared_ptr<RegisteredDescriptorPoolState> builtin_pool_;
+-};
+-
+ static std::unique_ptr<const ConstantEvaluator> MaybeSetConstantEvaluator(
+     const AnalyzerOptionsProto& options_proto, AnalyzerOptions* options,
+     EvaluatorOptions evaluator_options) {
+@@ -460,148 +351,17 @@ class InternalPreparedModifyState : public GenericState {
+ class PreparedModifyPool : public SharedStatePool<InternalPreparedModifyState> {
+ };
+ 
+-class RegisteredCatalogState : public GenericState {
+- public:
+-  RegisteredCatalogState() = delete;
+-  RegisteredCatalogState(const RegisteredCatalogState&) = delete;
+-  RegisteredCatalogState& operator=(const RegisteredCatalogState&) = delete;
+-
+-  static absl::StatusOr<std::unique_ptr<RegisteredCatalogState>> Create(
+-      const SimpleCatalogProto& proto,
+-      const google::protobuf::Map<std::string, TableContent>& tables_contents,
+-      const std::vector<const google::protobuf::DescriptorPool*>& pools,
+-      absl::flat_hash_set<int64_t> owned_descriptor_pool_ids = {}) {
+-    std::unique_ptr<SimpleCatalog> catalog;
+-
+-    if (tables_contents.empty()) {
+-      // If there are is no table content to be set then there is no need
+-      // to serialize the Tables independently and we can deserialize
+-      // the Catalog proto as it is
+-      GOOGLESQL_RETURN_IF_ERROR(SimpleCatalog::Deserialize(proto, pools, &catalog));
+-    } else {
+-      // Make a copy of the original immutable Catalog proto, which will be
+-      // mutable and will allow us to manipulate the tables' contents
+-      SimpleCatalogProto proto_copy = proto;
+-      proto_copy.clear_table();
+-
+-      // Deserialize the Catalog proto with the tables
+-      GOOGLESQL_RETURN_IF_ERROR(SimpleCatalog::Deserialize(proto_copy, pools, &catalog));
+-
+-      // Deserialize each individual Table proto, set its content if provided
+-      // and then add the Table to the Catalog
+-      const TypeDeserializer type_deserializer =
+-          TypeDeserializer(catalog->type_factory(), pools);
+-      for (const SimpleTableProto& table_proto : proto.table()) {
+-        const std::string& name = table_proto.has_name_in_catalog()
+-                                      ? table_proto.name_in_catalog()
+-                                      : table_proto.name();
+-        GOOGLESQL_ASSIGN_OR_RETURN(std::unique_ptr<SimpleTable> table,
+-                         DeserializeTable(name, table_proto, tables_contents,
+-                                          type_deserializer));
+-
+-        if (!catalog->AddOwnedTableIfNotPresent(name, std::move(table))) {
+-          return ::googlesql_base::InvalidArgumentErrorBuilder()
+-                 << "Duplicate table '" << name << "' in serialized catalog";
+-        }
+-      }
+-    }
+-
+-    return absl::WrapUnique(new RegisteredCatalogState(
+-        std::move(catalog), std::move(owned_descriptor_pool_ids)));
+-  }
+-
+-  // Ideally, this would be const, however, the googlesql analyzer API
+-  // requires this be mutable (even though it does ever mutate anything).
+-  SimpleCatalog* GetCatalog() { return catalog_.get(); }
+-
+-  const absl::flat_hash_set<int64_t>& owned_descriptor_pool_ids() const {
+-    return owned_descriptor_pool_ids_;
+-  }
+-
+- private:
+-  RegisteredCatalogState(std::unique_ptr<SimpleCatalog> catalog,
+-                         absl::flat_hash_set<int64_t> owned_descriptor_pool_ids)
+-      : catalog_(std::move(catalog)),
+-        owned_descriptor_pool_ids_(std::move(owned_descriptor_pool_ids)) {}
+-
+-  static absl::StatusOr<std::unique_ptr<SimpleTable>> DeserializeTable(
+-      absl::string_view name, const SimpleTableProto& proto,
+-      const google::protobuf::Map<std::string, TableContent>& tables_contents,
+-      const TypeDeserializer& type_deserializer) {
+-    GOOGLESQL_ASSIGN_OR_RETURN(std::unique_ptr<SimpleTable> table,
+-                     SimpleTable::Deserialize(proto, type_deserializer));
+-
+-    const TableContent* table_content = googlesql_base::FindOrNull(tables_contents, name);
+-    if (table_content == nullptr || !table_content->has_table_data()) {
+-      return table;
+-    }
+-
+-    const TableData& table_data = table_content->table_data();
+-
+-    std::vector<std::vector<Value>> content;
+-    for (const auto& row : table_data.row()) {
+-      std::vector<Value> googlesql_row;
+-      for (int i = 0; i < row.cell_size(); i++) {
+-        GOOGLESQL_ASSIGN_OR_RETURN(
+-            auto googlesql_value,
+-            Value::Deserialize(row.cell(i), table->GetColumn(i)->GetType()));
+-        googlesql_row.push_back(googlesql_value);
+-      }
+-      content.push_back(std::move(googlesql_row));
+-    }
+-    table->SetContents(std::move(content));
+-
+-    return table;
+-  }
+-
+-  const std::unique_ptr<SimpleCatalog> catalog_;
+-  const absl::flat_hash_set<int64_t> owned_descriptor_pool_ids_;
+-};
+-
+-class RegisteredCatalogPool : public SharedStatePool<RegisteredCatalogState> {};
+-
+ GoogleSqlLocalServiceImpl::GoogleSqlLocalServiceImpl()
+-    : registered_descriptor_pools_(new RegisteredDescriptorPoolPool()),
+-      registered_catalogs_(new RegisteredCatalogPool()),
+-      prepared_expressions_(new PreparedExpressionPool()),
++    : prepared_expressions_(new PreparedExpressionPool()),
+       prepared_queries_(new PreparedQueryPool()),
+       prepared_modifies_(new PreparedModifyPool()) {}
+ 
+ GoogleSqlLocalServiceImpl::~GoogleSqlLocalServiceImpl() = default;
+ 
+-void GoogleSqlLocalServiceImpl::CleanupCatalog(
+-    std::optional<int64_t>* catalog_id) {
+-  if (catalog_id->has_value()) {
+-    registered_catalogs_->Delete(**catalog_id);
+-  }
+-}
+-
+-void GoogleSqlLocalServiceImpl::CleanupDescriptorPools(
+-    absl::flat_hash_set<int64_t>* descriptor_pool_ids) {
+-  for (int64_t pool_id : *descriptor_pool_ids) {
+-    registered_descriptor_pools_->Delete(pool_id);
+-  }
+-}
+-
+-absl::Status GoogleSqlLocalServiceImpl::RegisterNewDescriptorPools(
+-    std::vector<std::shared_ptr<RegisteredDescriptorPoolState>>&
+-        descriptor_pool_states,
+-    absl::flat_hash_set<int64_t>& registered_descriptor_pool_ids,
+-    DescriptorPoolIdList& descriptor_pool_id_list) {
+-  registered_descriptor_pool_ids.clear();
+-  descriptor_pool_id_list.Clear();
+-  for (std::shared_ptr<RegisteredDescriptorPoolState>& pool_state :
+-       descriptor_pool_states) {
+-    if (!pool_state->IsRegistered()) {
+-      // Not registered, so we registered it, and own it.
+-      int64_t pool_id = registered_descriptor_pools_->Register(pool_state);
+-      GOOGLESQL_RET_CHECK_NE(-1, pool_id)
+-          << "Failed to register descriptor pool, this shouldn't happen";
+-      registered_descriptor_pool_ids.insert(pool_id);
+-    }
+-    descriptor_pool_id_list.add_registered_ids(pool_state->GetId());
+-  }
+-  return absl::OkStatus();
++absl::StatusOr<std::unique_ptr<const ConstantEvaluator>>
++GoogleSqlLocalServiceImpl::MaybeCreateConstantEvaluator(
++    const AnalyzerOptionsProto& options_proto, AnalyzerOptions* options) {
++  return MaybeSetConstantEvaluator(options_proto, options, EvaluatorOptions{});
+ }
+ 
+ absl::Status GoogleSqlLocalServiceImpl::Prepare(const PrepareRequest& request,
+@@ -1128,569 +888,6 @@ absl::Status GoogleSqlLocalServiceImpl::EvaluatePrepared(
+   return results_iterator->Status();
+ }
+ 
+-absl::Status GoogleSqlLocalServiceImpl::GetTableFromProto(
+-    const TableFromProtoRequest& request, SimpleTableProto* response) {
+-  TypeFactory factory;
+-  google::protobuf::DescriptorPool pool;
+-  GOOGLESQL_RETURN_IF_ERROR(
+-      AddFileDescriptorSetToPool(&request.file_descriptor_set(), &pool));
+-  const google::protobuf::Descriptor* proto_descr =
+-      pool.FindMessageTypeByName(request.proto().proto_name());
+-  if (proto_descr == nullptr) {
+-    return ::googlesql_base::UnknownErrorBuilder()
+-           << "Proto type name not found: " << request.proto().proto_name();
+-  }
+-  if (proto_descr->file()->name() != request.proto().proto_file_name()) {
+-    return ::googlesql_base::UnknownErrorBuilder()
+-           << "Proto " << request.proto().proto_name() << " found in "
+-           << proto_descr->file()->name() << ", not "
+-           << request.proto().proto_file_name() << " as specified.";
+-  }
+-  TableFromProto table(proto_descr->name());
+-  GOOGLESQL_RETURN_IF_ERROR(table.Init(proto_descr, &factory));
+-  FileDescriptorSetMap file_descriptor_set_map;
+-  GOOGLESQL_RETURN_IF_ERROR(table.Serialize(&file_descriptor_set_map, response));
+-  if (!file_descriptor_set_map.empty()) {
+-    GOOGLESQL_RET_CHECK_EQ(1, file_descriptor_set_map.size())
+-        << "Table from proto " << proto_descr->full_name()
+-        << " uses unknown DescriptorPool, this shouldn't happen.";
+-    GOOGLESQL_RET_CHECK_EQ(0, file_descriptor_set_map.at(&pool)->descriptor_set_index)
+-        << "Table from proto " << proto_descr->full_name()
+-        << " uses unknown DescriptorPool, this shouldn't happen.";
+-  }
+-  return absl::OkStatus();
+-}
+-
+-absl::Status GoogleSqlLocalServiceImpl::GetDescriptorPools(
+-    const DescriptorPoolListProto& descriptor_pool_list,
+-    std::vector<std::shared_ptr<RegisteredDescriptorPoolState>>&
+-        descriptor_pool_states,
+-    std::vector<const google::protobuf::DescriptorPool*>& descriptor_pools) {
+-  using Definition = DescriptorPoolListProto::Definition;
+-  descriptor_pool_states.clear();
+-  descriptor_pools.clear();
+-  for (const Definition& definition : descriptor_pool_list.definitions()) {
+-    std::shared_ptr<RegisteredDescriptorPoolState> state;
+-    switch (definition.definition_case()) {
+-      case Definition::kFileDescriptorSet: {
+-        GOOGLESQL_ASSIGN_OR_RETURN(state, RegisteredDescriptorPoolState::Create(
+-                                    definition.file_descriptor_set()));
+-        break;
+-      }
+-      case Definition::kRegisteredId: {
+-        state = registered_descriptor_pools_->Get(definition.registered_id());
+-        if (state == nullptr) {
+-          return absl::Status(
+-              absl::StatusCode::kInvalidArgument,
+-              absl::StrCat("Invalid DescriptorPoolList::Definition: unknown "
+-                           "registered_id",
+-                           definition));
+-        }
+-        break;
+-      }
+-      case Definition::kBuiltin: {
+-        state = registered_descriptor_pools_->GetBuiltinDescriptorPoolState();
+-        break;
+-      }
+-      default:
+-        return absl::Status(
+-            absl::StatusCode::kInvalidArgument,
+-            absl::StrCat(
+-                "Invalid DescriptorPoolList::Definition contains unknown "
+-                "definition type",
+-                definition));
+-    }
+-    descriptor_pool_states.push_back(state);
+-    GOOGLESQL_RET_CHECK_NE(state->pool(), nullptr);
+-    descriptor_pools.push_back(state->pool());
+-  }
+-
+-  return absl::OkStatus();
+-}
+-
+-template <typename RequestProto>
+-absl::Status GoogleSqlLocalServiceImpl::GetCatalogState(
+-    const RequestProto& request,
+-    const google::protobuf::Map<std::string, TableContent>& tables_contents,
+-    const std::vector<const google::protobuf::DescriptorPool*>& pools,
+-    std::shared_ptr<RegisteredCatalogState>& state) {
+-  if (request.has_registered_catalog_id()) {
+-    // At the moment there is no support for updating the tables' contents
+-    // of a registered catalog
+-    if (!tables_contents.empty()) {
+-      return MakeSqlError() << "Modifying the content of a registered catalog "
+-                               "is not supported";
+-    }
+-    int64_t id = request.registered_catalog_id();
+-    state = registered_catalogs_->Get(id);
+-    if (state == nullptr) {
+-      return MakeSqlError() << "Registered catalog " << id << " unknown.";
+-    }
+-  } else {
+-    GOOGLESQL_ASSIGN_OR_RETURN(state,
+-                     RegisteredCatalogState::Create(request.simple_catalog(),
+-                                                    tables_contents, pools));
+-  }
+-  return absl::OkStatus();
+-}
+-
+-absl::Status GoogleSqlLocalServiceImpl::Analyze(const AnalyzeRequest& request,
+-                                                AnalyzeResponse* response) {
+-  std::shared_ptr<RegisteredCatalogState> catalog_state;
+-  std::vector<const google::protobuf::DescriptorPool*> pools;
+-  std::vector<std::shared_ptr<RegisteredDescriptorPoolState>>
+-      descriptor_pool_states;
+-
+-  GOOGLESQL_RETURN_IF_ERROR(GetDescriptorPools(request.descriptor_pool_list(),
+-                                     descriptor_pool_states, pools));
+-  GOOGLESQL_RETURN_IF_ERROR(GetCatalogState(request, {}, pools, catalog_state));
+-  if (request.has_sql_expression()) {
+-    return AnalyzeExpressionImpl(request, pools, catalog_state->GetCatalog(),
+-                                 response);
+-  } else {
+-    return AnalyzeImpl(request, pools, catalog_state->GetCatalog(), response);
+-  }
+-}
+-
+-absl::Status GoogleSqlLocalServiceImpl::AnalyzeImpl(
+-    const AnalyzeRequest& request,
+-    const std::vector<const google::protobuf::DescriptorPool*>& pools, Catalog* catalog,
+-    AnalyzeResponse* response) {
+-  GOOGLESQL_RET_CHECK(catalog->Is<SimpleCatalog>());
+-  GOOGLESQL_RET_CHECK_NE(catalog, nullptr);
+-
+-  AnalyzerOptions options;
+-  TypeFactory factory;
+-  GOOGLESQL_RETURN_IF_ERROR(AnalyzerOptions::Deserialize(request.options(), pools,
+-                                               &factory, &options));
+-  std::vector<std::unique_ptr<const AnalyzerOutput>> property_graph_artifacts;
+-  GOOGLESQL_RETURN_IF_ERROR(ResolvePropertyDefinitionsForSimpleCatalog(
+-      options, *catalog->GetAs<SimpleCatalog>(), property_graph_artifacts));
+-  std::unique_ptr<const ConstantEvaluator> constant_evaluator =
+-      MaybeSetConstantEvaluator(request.options(), &options,
+-                                EvaluatorOptions{});
+-
+-  if (!(request.has_sql_statement() || request.has_parse_resume_location())) {
+-    return ::googlesql_base::UnknownErrorBuilder()
+-           << "Unrecognized AnalyzeRequest target " << request.target_case();
+-  }
+-  std::unique_ptr<const AnalyzerOutput> output;
+-
+-  if (request.has_sql_statement()) {
+-    absl::string_view sql = request.sql_statement();
+-
+-    GOOGLESQL_RETURN_IF_ERROR(
+-        googlesql::AnalyzeStatement(sql, options, catalog, &factory, &output));
+-
+-    GOOGLESQL_RETURN_IF_ERROR(
+-        SerializeResolvedOutput(output.get(), pools, sql, response));
+-  } else if (request.has_parse_resume_location()) {
+-    bool at_end_of_input;
+-    ParseResumeLocation location =
+-        ParseResumeLocation::FromProto(request.parse_resume_location());
+-    GOOGLESQL_RETURN_IF_ERROR(googlesql::AnalyzeNextStatement(
+-        &location, options, catalog, &factory, &output, &at_end_of_input));
+-
+-    GOOGLESQL_RETURN_IF_ERROR(SerializeResolvedOutput(output.get(), pools,
+-                                            location.input(), response));
+-    response->set_resume_byte_position(location.byte_position());
+-  }
+-  return absl::OkStatus();
+-}
+-
+-absl::Status GoogleSqlLocalServiceImpl::AnalyzeExpressionImpl(
+-    const AnalyzeRequest& request,
+-    const std::vector<const google::protobuf::DescriptorPool*>& pools, Catalog* catalog,
+-    AnalyzeResponse* response) {
+-  GOOGLESQL_RET_CHECK(catalog->Is<SimpleCatalog>());
+-  GOOGLESQL_RET_CHECK_NE(catalog, nullptr);
+-
+-  AnalyzerOptions options;
+-  TypeFactory factory;
+-  GOOGLESQL_RETURN_IF_ERROR(AnalyzerOptions::Deserialize(request.options(), pools,
+-                                               &factory, &options));
+-  std::vector<std::unique_ptr<const AnalyzerOutput>> property_graph_artifacts;
+-  GOOGLESQL_RETURN_IF_ERROR(ResolvePropertyDefinitionsForSimpleCatalog(
+-      options, *catalog->GetAs<SimpleCatalog>(), property_graph_artifacts));
+-  std::unique_ptr<const ConstantEvaluator> constant_evaluator =
+-      MaybeSetConstantEvaluator(request.options(), &options,
+-                                EvaluatorOptions{});
+-
+-  if (request.has_sql_expression()) {
+-    std::unique_ptr<const AnalyzerOutput> output;
+-    TypeFactory factory;
+-
+-    absl::string_view sql = request.sql_expression();
+-
+-    GOOGLESQL_RETURN_IF_ERROR(
+-        googlesql::AnalyzeExpression(sql, options, catalog, &factory, &output));
+-
+-    GOOGLESQL_RETURN_IF_ERROR(
+-        SerializeResolvedOutput(output.get(), pools, sql, response));
+-  }
+-  return absl::OkStatus();
+-}
+-
+-absl::Status GoogleSqlLocalServiceImpl::BuildSql(const BuildSqlRequest& request,
+-                                                 BuildSqlResponse* response) {
+-  std::shared_ptr<RegisteredCatalogState> catalog_state;
+-  std::vector<const google::protobuf::DescriptorPool*> pools;
+-
+-  std::vector<std::shared_ptr<RegisteredDescriptorPoolState>>
+-      descriptor_pool_states;
+-
+-  GOOGLESQL_RETURN_IF_ERROR(GetDescriptorPools(request.descriptor_pool_list(),
+-                                     descriptor_pool_states, pools));
+-  GOOGLESQL_RETURN_IF_ERROR(GetCatalogState(request, {}, pools, catalog_state));
+-  IdStringPool string_pool;
+-  ResolvedNode::RestoreParams restore_params(
+-      pools, catalog_state->GetCatalog(),
+-      catalog_state->GetCatalog()->type_factory(), &string_pool);
+-
+-  std::unique_ptr<ResolvedNode> ast;
+-  if (request.has_resolved_statement()) {
+-    GOOGLESQL_ASSIGN_OR_RETURN(std::unique_ptr<ResolvedStatement> statement,
+-                     ResolvedStatement::RestoreFrom(
+-                         request.resolved_statement(), restore_params));
+-    ast = std::move(statement);
+-  } else if (request.has_resolved_expression()) {
+-    GOOGLESQL_ASSIGN_OR_RETURN(std::unique_ptr<ResolvedExpr> expression,
+-                     ResolvedExpr::RestoreFrom(request.resolved_expression(),
+-                                               restore_params));
+-    ast = std::move(expression);
+-  } else {
+-    return absl::OkStatus();
+-  }
+-
+-  googlesql::SQLBuilder::SQLBuilderOptions builder_options;
+-  builder_options.catalog = catalog_state->GetCatalog();
+-  googlesql::SQLBuilder sql_builder(builder_options);
+-
+-  GOOGLESQL_CHECK_OK(ast->Accept(&sql_builder));
+-  response->set_sql(sql_builder.sql());
+-  return absl::OkStatus();
+-}
+-
+-absl::Status GoogleSqlLocalServiceImpl::ExtractTableNamesFromStatement(
+-    const ExtractTableNamesFromStatementRequest& request,
+-    ExtractTableNamesFromStatementResponse* response) {
+-  LanguageOptions language_options = request.has_options()
+-                                         ? LanguageOptions(request.options())
+-                                         : LanguageOptions();
+-
+-  googlesql::TableNamesSet table_names;
+-  if (request.allow_script()) {
+-    GOOGLESQL_RETURN_IF_ERROR(googlesql::ExtractTableNamesFromScript(
+-        request.sql_statement(), googlesql::AnalyzerOptions(language_options),
+-        &table_names));
+-  } else {
+-    GOOGLESQL_RETURN_IF_ERROR(googlesql::ExtractTableNamesFromStatement(
+-        request.sql_statement(), googlesql::AnalyzerOptions(language_options),
+-        &table_names));
+-  }
+-  for (const std::vector<std::string>& table_name : table_names) {
+-    ExtractTableNamesFromStatementResponse_TableName* table_name_field =
+-        response->add_table_name();
+-    for (const std::string& name_segment : table_name) {
+-      table_name_field->add_table_name_segment(name_segment);
+-    }
+-  }
+-  return absl::OkStatus();
+-}
+-
+-absl::Status GoogleSqlLocalServiceImpl::ExtractTableNamesFromNextStatement(
+-    const ExtractTableNamesFromNextStatementRequest& request,
+-    ExtractTableNamesFromNextStatementResponse* response) {
+-  ParseResumeLocation location =
+-      ParseResumeLocation::FromProto(request.parse_resume_location());
+-
+-  LanguageOptions language_options = request.has_options()
+-                                         ? LanguageOptions(request.options())
+-                                         : LanguageOptions();
+-
+-  bool at_end_of_input;
+-  googlesql::TableNamesSet table_names;
+-  GOOGLESQL_RETURN_IF_ERROR(googlesql::ExtractTableNamesFromNextStatement(
+-      &location, googlesql::AnalyzerOptions(language_options), &table_names,
+-      &at_end_of_input));
+-
+-  for (const std::vector<std::string>& table_name : table_names) {
+-    ExtractTableNamesFromNextStatementResponse_TableName* table_name_field =
+-        response->add_table_name();
+-    for (const std::string& name_segment : table_name) {
+-      table_name_field->add_table_name_segment(name_segment);
+-    }
+-  }
+-
+-  response->set_resume_byte_position(location.byte_position());
+-
+-  return absl::OkStatus();
+-}
+-
+-absl::Status GoogleSqlLocalServiceImpl::SerializeResolvedOutput(
+-    const AnalyzerOutput* output,
+-    const std::vector<const google::protobuf::DescriptorPool*>& pools,
+-    absl::string_view statement, AnalyzeResponse* response) {
+-  FileDescriptorSetMap file_descriptor_set_map;
+-  PopulateExistingPoolsToFileDescriptorSetMap(pools, &file_descriptor_set_map);
+-
+-  if (output->resolved_statement() != nullptr) {
+-    GOOGLESQL_RETURN_IF_ERROR(output->resolved_statement()->SaveTo(
+-        &file_descriptor_set_map, response->mutable_resolved_statement()));
+-  } else {
+-    GOOGLESQL_RETURN_IF_ERROR(output->resolved_expr()->SaveTo(
+-        &file_descriptor_set_map, response->mutable_resolved_expression()));
+-  }
+-
+-  // If the file_descriptor_set_map contains more descriptor pools than those
+-  // passed in the request, the additional one must be the generated descriptor
+-  // pool. The reason is that some built-in functions use the DatetimePart
+-  // enum whose descriptor comes from the generated pool.
+-  // TODO: Describe the descriptor pool passing contract in detail
+-  // with a doc, and put a link here.
+-  if (file_descriptor_set_map.size() != pools.size()) {
+-    GOOGLESQL_RET_CHECK_EQ(file_descriptor_set_map.size(), pools.size() + 1)
+-        << "Analyzer result of " << statement
+-        << " uses unknown DescriptorPool, this shouldn't happen.";
+-    const auto& entry =
+-        file_descriptor_set_map.at(google::protobuf::DescriptorPool::generated_pool());
+-    GOOGLESQL_RET_CHECK_NE(entry.get(), nullptr)
+-        << "Analyzer result of " << statement
+-        << " uses unknown DescriptorPool, this shouldn't happen.";
+-    GOOGLESQL_RET_CHECK_EQ(entry->descriptor_set_index, pools.size())
+-        << "Analyzer result of " << statement
+-        << " uses unknown DescriptorPool, this shouldn't happen.";
+-  }
+-
+-  return absl::OkStatus();
+-}
+-
+-absl::Status GoogleSqlLocalServiceImpl::FormatSql(
+-    const FormatSqlRequest& request, FormatSqlResponse* response) {
+-  return ::googlesql::FormatSql(request.sql(), response->mutable_sql());
+-}
+-
+-absl::Status GoogleSqlLocalServiceImpl::LenientFormatSql(
+-    const FormatSqlRequest& request, FormatSqlResponse* response) {
+-  ::googlesql::FormatterOptions options(request.options());
+-  std::vector<FormatterRange> ranges(request.byte_ranges_size());
+-  std::transform(request.byte_ranges().begin(), request.byte_ranges().end(),
+-                 ranges.begin(), [](FormatterRangeProto f) {
+-                   return FormatterRange({.start = f.start(), .end = f.end()});
+-                 });
+-  absl::StatusOr<std::string> result =
+-      ::googlesql::LenientFormatSqlByteRanges(request.sql(), ranges, options);
+-  if (result.ok()) {
+-    response->set_sql(result.value());
+-  }
+-  return result.status();
+-}
+-
+-absl::Status GoogleSqlLocalServiceImpl::RegisterCatalog(
+-    const RegisterCatalogRequest& request, RegisterResponse* response) {
+-  std::vector<std::shared_ptr<RegisteredDescriptorPoolState>>
+-      descriptor_pool_states;
+-  std::vector<const google::protobuf::DescriptorPool*> pools;
+-
+-  GOOGLESQL_RETURN_IF_ERROR(GetDescriptorPools(request.descriptor_pool_list(),
+-                                     descriptor_pool_states, pools));
+-
+-  absl::flat_hash_set<int64_t> owned_descriptor_pool_ids;
+-  // On error, make sure we don't leak any registered descriptor pools.
+-  auto descriptor_pool_cleanup = absl::MakeCleanup(
+-      absl::bind_front(&GoogleSqlLocalServiceImpl::CleanupDescriptorPools, this,
+-                       &owned_descriptor_pool_ids));
+-  for (std::shared_ptr<RegisteredDescriptorPoolState>& pool_state :
+-       descriptor_pool_states) {
+-    if (!pool_state->IsRegistered()) {
+-      // Not registered, so we registered it, and own it.
+-      int64_t pool_id = registered_descriptor_pools_->Register(pool_state);
+-      GOOGLESQL_RET_CHECK_NE(-1, pool_id)
+-          << "Failed to register descriptor pool, this shouldn't happen";
+-      owned_descriptor_pool_ids.insert(pool_id);
+-    }
+-    response->mutable_descriptor_pool_id_list()->add_registered_ids(
+-        pool_state->GetId());
+-  }
+-
+-  GOOGLESQL_ASSIGN_OR_RETURN(std::unique_ptr<RegisteredCatalogState> state,
+-                   RegisteredCatalogState::Create(
+-                       request.simple_catalog(), request.table_content(), pools,
+-                       owned_descriptor_pool_ids));
+-  int64_t id = registered_catalogs_->Register(std::move(state));
+-  GOOGLESQL_RET_CHECK_NE(-1, id) << "Failed to register catalog, this shouldn't happen.";
+-
+-  response->set_registered_id(id);
+-  // No errors, caller is now responsible for the prepared expression and
+-  // therefore any owned descriptor pools.
+-  std::move(descriptor_pool_cleanup).Cancel();
+-
+-  return absl::OkStatus();
+-}
+-
+-absl::Status GoogleSqlLocalServiceImpl::UnregisterCatalog(int64_t id) {
+-  std::shared_ptr<RegisteredCatalogState> state = registered_catalogs_->Get(id);
+-  if (state == nullptr) {
+-    return MakeSqlError() << "Unknown catalog ID: " << id;
+-  }
+-
+-  absl::Status status;
+-  for (int64_t pool_id : state->owned_descriptor_pool_ids()) {
+-    if (!registered_descriptor_pools_->Delete(pool_id)) {
+-      status = MakeSqlError() << "Unknown descriptor pool ID: " << pool_id;
+-    }
+-  }
+-  if (!registered_catalogs_->Delete(id)) {
+-    status = MakeSqlError() << "Failed to fully delete catalog ID: " << id;
+-  }
+-  return status;
+-}
+-
+-absl::Status GoogleSqlLocalServiceImpl::GetBuiltinFunctions(
+-    const GoogleSQLBuiltinFunctionOptionsProto& proto,
+-    GetBuiltinFunctionsResponse* resp) {
+-  TypeFactory factory;
+-  absl::flat_hash_map<std::string, std::unique_ptr<Function>> functions;
+-  absl::flat_hash_map<std::string, std::unique_ptr<TableValuedFunction>>
+-      table_valued_functions;
+-  BuiltinFunctionOptions options(proto);
+-  absl::flat_hash_map<std::string, const Type*> types;
+-
+-  GOOGLESQL_RETURN_IF_ERROR(GetBuiltinFunctionsAndTypes(options, factory, functions,
+-                                              types, table_valued_functions));
+-
+-  FileDescriptorSetMap file_descriptor_set_map;
+-  for (const auto& function : functions) {
+-    GOOGLESQL_RETURN_IF_ERROR(function.second->Serialize(&file_descriptor_set_map,
+-                                               resp->add_function()));
+-  }
+-
+-  for (const auto& table_valued_function : table_valued_functions) {
+-    GOOGLESQL_RETURN_IF_ERROR(table_valued_function.second->Serialize(
+-        &file_descriptor_set_map, resp->add_table_valued_function()));
+-  }
+-
+-  auto& response_types = *resp->mutable_types();
+-  for (const auto& [name, type] : types) {
+-    TypeProto& type_proto = response_types[name];
+-    GOOGLESQL_RETURN_IF_ERROR(type->SerializeToProtoAndDistinctFileDescriptors(
+-        &type_proto, &file_descriptor_set_map));
+-  }
+-
+-  return absl::OkStatus();
+-}
+-
+-absl::Status GoogleSqlLocalServiceImpl::GetLanguageOptions(
+-    const LanguageOptionsRequest& request, LanguageOptionsProto* response) {
+-  googlesql::LanguageOptions options;
+-  if (request.has_maximum_features() && request.maximum_features()) {
+-    options.EnableMaximumLanguageFeatures();
+-  }
+-  if (request.has_language_version()) {
+-    options.SetLanguageVersion(request.language_version());
+-  }
+-  options.Serialize(response);
+-  return absl::OkStatus();
+-}
+-
+-absl::Status GoogleSqlLocalServiceImpl::GetAnalyzerOptions(
+-    const AnalyzerOptionsRequest& request, AnalyzerOptionsProto* response) {
+-  googlesql::AnalyzerOptions options;
+-  FileDescriptorSetMap unused_map;
+-  return options.Serialize(&unused_map, response);
+-}
+-
+-absl::Status GoogleSqlLocalServiceImpl::Parse(const ParseRequest& request,
+-                                              ParseResponse* response) {
+-  auto language_options =
+-      request.has_options()
+-          ? std::make_unique<LanguageOptions>(request.options())
+-          : std::make_unique<LanguageOptions>();
+-
+-  ParserOptions parser_options = ParserOptions(
+-      /*id_string_pool=*/nullptr, /*arena=*/nullptr,
+-      language_options ? *language_options : LanguageOptions());
+-
+-  if (request.allow_script()) {
+-    return ParseScriptImpl(request, response, parser_options);
+-  } else {
+-    return ParseStatementImpl(request, response, parser_options);
+-  }
+-}
+-
+-absl::Status GoogleSqlLocalServiceImpl::ParseStatementImpl(
+-    const ParseRequest& request, ParseResponse* response,
+-    ParserOptions& parser_options) {
+-  std::unique_ptr<ParserOutput> parser_output;
+-
+-  if (request.has_sql_statement()) {
+-    absl::string_view sql = request.sql_statement();
+-
+-    GOOGLESQL_RETURN_IF_ERROR(ParseStatement(sql, parser_options, &parser_output));
+-
+-    return ParseTreeSerializer::Serialize(parser_output->statement(),
+-                                          response->mutable_parsed_statement());
+-  } else if (request.has_parse_resume_location()) {
+-    bool at_end_of_input;
+-    ParseResumeLocation location =
+-        ParseResumeLocation::FromProto(request.parse_resume_location());
+-    GOOGLESQL_RETURN_IF_ERROR(ParseNextStatement(&location, parser_options,
+-                                       &parser_output, &at_end_of_input));
+-
+-    response->set_resume_byte_position(location.byte_position());
+-    return ParseTreeSerializer::Serialize(parser_output->statement(),
+-                                          response->mutable_parsed_statement());
+-  } else {
+-    return ::googlesql_base::UnknownErrorBuilder() << "ParseRequest target not set";
+-  }
+-
+-  return absl::OkStatus();
+-}
+-
+-absl::Status GoogleSqlLocalServiceImpl::ParseScriptImpl(
+-    const ParseRequest& request, ParseResponse* response,
+-    ParserOptions& parser_options) {
+-  std::unique_ptr<ParserOutput> parser_output;
+-
+-  if (request.has_sql_statement()) {
+-    absl::string_view sql = request.sql_statement();
+-
+-    GOOGLESQL_RETURN_IF_ERROR(
+-        ParseScript(sql, parser_options,
+-                    {.mode = ErrorMessageMode::ERROR_MESSAGE_ONE_LINE,
+-                     .attach_error_location_payload =
+-                         (ErrorMessageMode::ERROR_MESSAGE_ONE_LINE ==
+-                          ErrorMessageMode::ERROR_MESSAGE_WITH_PAYLOAD),
+-                     .stability = GetDefaultErrorMessageStability()},
+-                    &parser_output));
+-
+-    return ParseTreeSerializer::Serialize(parser_output->script(),
+-                                          response->mutable_parsed_script());
+-  } else if (request.has_parse_resume_location()) {
+-    bool at_end_of_input;
+-    ParseResumeLocation location =
+-        ParseResumeLocation::FromProto(request.parse_resume_location());
+-    GOOGLESQL_RETURN_IF_ERROR(ParseNextScriptStatement(&location, parser_options,
+-                                             &parser_output, &at_end_of_input));
+-
+-    response->set_resume_byte_position(location.byte_position());
+-    return ParseTreeSerializer::Serialize(parser_output->statement(),
+-                                          response->mutable_parsed_statement());
+-  } else {
+-    return ::googlesql_base::UnknownErrorBuilder() << "ParseRequest target not set";
+-  }
+-
+-  return absl::OkStatus();
+-}
+-
+-size_t GoogleSqlLocalServiceImpl::NumRegisteredDescriptorPools() const {
+-  return registered_descriptor_pools_->NumSavedStates();
+-}
+-
+-size_t GoogleSqlLocalServiceImpl::NumRegisteredCatalogs() const {
+-  return registered_catalogs_->NumSavedStates();
+-}
+-
+ size_t GoogleSqlLocalServiceImpl::NumSavedPreparedExpression() const {
+   return prepared_expressions_->NumSavedStates();
+ }
+diff --git a/googlesql/local_service/local_service.h b/googlesql/local_service/local_service.h
+index e585a6697..195ebe43e 100644
+--- a/googlesql/local_service/local_service.h
++++ b/googlesql/local_service/local_service.h
+@@ -26,6 +26,7 @@
+ #include <vector>
+ 
+ #include "googlesql/local_service/local_service.pb.h"
++#include "googlesql/local_service/local_service_analysis.h"
+ #include "googlesql/local_service/state.h"
+ #include "googlesql/proto/options.pb.h"
+ #include "googlesql/public/analyzer.h"
+@@ -46,19 +47,20 @@ class InternalPreparedQueryState;
+ class PreparedExpressionPool;
+ class PreparedModifyPool;
+ class PreparedQueryPool;
+-class RegisteredCatalogPool;
+-class RegisteredCatalogState;
+-class RegisteredDescriptorPoolPool;
+-class RegisteredDescriptorPoolState;
+ 
+ // Implementation of GoogleSqlLocalService RPC service.
+-class GoogleSqlLocalServiceImpl {
++//
++// The analysis-only RPCs (Parse, Analyze, BuildSql, formatting, catalog
++// registration, ...) are implemented by GoogleSqlLocalServiceAnalysisImpl;
++// this class adds the Prepare/Evaluate/Unprepare RPC families, which depend
++// on the reference implementation evaluator.
++class GoogleSqlLocalServiceImpl : public GoogleSqlLocalServiceAnalysisImpl {
+  public:
+   GoogleSqlLocalServiceImpl();
+   GoogleSqlLocalServiceImpl(const GoogleSqlLocalServiceImpl&) = delete;
+   GoogleSqlLocalServiceImpl& operator=(const GoogleSqlLocalServiceImpl&) =
+       delete;
+-  ~GoogleSqlLocalServiceImpl();
++  ~GoogleSqlLocalServiceImpl() override;
+ 
+   absl::Status Prepare(const PrepareRequest& request,
+                        PrepareResponse* response);
+@@ -84,107 +86,7 @@ class GoogleSqlLocalServiceImpl {
+   absl::Status EvaluateModify(const EvaluateModifyRequest& request,
+                               EvaluateModifyResponse* response);
+ 
+-  absl::Status GetTableFromProto(const TableFromProtoRequest& request,
+-                                 SimpleTableProto* response);
+-
+-  absl::Status GetBuiltinFunctions(
+-      const GoogleSQLBuiltinFunctionOptionsProto& proto,
+-      GetBuiltinFunctionsResponse* resp);
+-
+-  absl::Status Analyze(const AnalyzeRequest& request,
+-                       AnalyzeResponse* response);
+-
+-  absl::Status AnalyzeImpl(
+-      const AnalyzeRequest& request,
+-      const std::vector<const google::protobuf::DescriptorPool*>& pools,
+-      // Analyzer requires a non-const catalog, however
+-      // is not mutated in practice.
+-      Catalog* catalog, AnalyzeResponse* response);
+-
+-  absl::Status AnalyzeExpressionImpl(
+-      const AnalyzeRequest& request,
+-      const std::vector<const google::protobuf::DescriptorPool*>& pools,
+-      // Analyzer requires a non-const catalog, however
+-      // is not mutated in practice.
+-      Catalog* catalog, AnalyzeResponse* response);
+-
+-  absl::Status BuildSql(const BuildSqlRequest& request,
+-                        BuildSqlResponse* response);
+-
+-  // Note, this also can handle scripts.
+-  absl::Status ExtractTableNamesFromStatement(
+-      const ExtractTableNamesFromStatementRequest& request,
+-      ExtractTableNamesFromStatementResponse* response);
+-
+-  // Note, this does not handle scripts.
+-  absl::Status ExtractTableNamesFromNextStatement(
+-      const ExtractTableNamesFromNextStatementRequest& request,
+-      ExtractTableNamesFromNextStatementResponse* response);
+-
+-  absl::Status SerializeResolvedOutput(
+-      const AnalyzerOutput* output,
+-      const std::vector<const google::protobuf::DescriptorPool*>& pools,
+-      absl::string_view statement, AnalyzeResponse* response);
+-
+-  absl::Status FormatSql(const FormatSqlRequest& request,
+-                         FormatSqlResponse* response);
+-
+-  absl::Status LenientFormatSql(const FormatSqlRequest& request,
+-                                FormatSqlResponse* response);
+-
+-  absl::Status RegisterCatalog(const RegisterCatalogRequest& request,
+-                               RegisterResponse* response);
+-
+-  absl::Status UnregisterCatalog(int64_t id);
+-
+-  absl::Status GetLanguageOptions(const LanguageOptionsRequest& request,
+-                                  LanguageOptionsProto* response);
+-
+-  absl::Status GetAnalyzerOptions(const AnalyzerOptionsRequest& request,
+-                                  AnalyzerOptionsProto* response);
+-
+-  absl::Status Parse(const ParseRequest& request, ParseResponse* response);
+-
+-  absl::Status ParseStatementImpl(const ParseRequest& request,
+-                                  ParseResponse* response,
+-                                  ParserOptions& parser_options);
+-
+-  absl::Status ParseScriptImpl(const ParseRequest& request,
+-                               ParseResponse* response,
+-                               ParserOptions& parser_options);
+-
+  private:
+-  // Fetches the descriptor pools for the given descriptor_pool_list.
+-  // descriptor_pools is a view into pool_states_out, and is returned as a
+-  // convenience for calls into the google Deserialize calls..
+-  // This will _not_ register the returned states, although it will retrieve
+-  // states based on registered_id as necessary.
+-  absl::Status GetDescriptorPools(
+-      const DescriptorPoolListProto& descriptor_pool_list,
+-      std::vector<std::shared_ptr<RegisteredDescriptorPoolState>>&
+-          pool_states_out,
+-      std::vector<const google::protobuf::DescriptorPool*>& descriptor_pools);
+-
+-  // Registers each entry in <descriptor_pool_states> if not already registered
+-  // and returns a list of the newly registered objects in
+-  // <owned_descriptor_pool_ids>.
+-  // Also sets <descriptor_pool_id_list> to the appropriate ids as a
+-  // convenience.
+-  absl::Status RegisterNewDescriptorPools(
+-      std::vector<std::shared_ptr<RegisteredDescriptorPoolState>>&
+-          descriptor_pool_states,
+-      absl::flat_hash_set<int64_t>& registered_descriptor_pool_ids,
+-      DescriptorPoolIdList& descriptor_pool_id_list);
+-
+-  template <typename RequestProto>
+-  absl::Status GetCatalogState(
+-      const RequestProto& request,
+-      const google::protobuf::Map<std::string, TableContent>& tables_contents,
+-      const std::vector<const google::protobuf::DescriptorPool*>& pools,
+-      std::shared_ptr<RegisteredCatalogState>& state);
+-
+-  std::unique_ptr<RegisteredDescriptorPoolPool> registered_descriptor_pools_;
+-  std::unique_ptr<RegisteredCatalogPool> registered_catalogs_;
+   std::unique_ptr<PreparedExpressionPool> prepared_expressions_;
+   std::unique_ptr<PreparedQueryPool> prepared_queries_;
+   std::unique_ptr<PreparedModifyPool> prepared_modifies_;
+@@ -236,14 +138,13 @@ class GoogleSqlLocalServiceImpl {
+       InternalPreparedExpressionState* internal_state,
+       EvaluateResponse* response);
+ 
+-  void CleanupDescriptorPools(
+-      absl::flat_hash_set<int64_t>* descriptor_pool_ids);
+-
+-  void CleanupCatalog(std::optional<int64_t>* catalog_id);
++  // Creates a PreparedExpression-backed constant evaluator when
++  // <options_proto> requests one; see the base class declaration.
++  absl::StatusOr<std::unique_ptr<const ConstantEvaluator>>
++  MaybeCreateConstantEvaluator(const AnalyzerOptionsProto& options_proto,
++                               AnalyzerOptions* options) override;
+ 
+   // For testing.
+-  size_t NumRegisteredDescriptorPools() const;
+-  size_t NumRegisteredCatalogs() const;
+   size_t NumSavedPreparedExpression() const;
+   size_t NumSavedPreparedQueries() const;
+   size_t NumSavedPreparedModifies() const;
+diff --git a/googlesql/local_service/local_service_analysis.cc b/googlesql/local_service/local_service_analysis.cc
+new file mode 100644
+index 000000000..3d2b19b26
+--- /dev/null
++++ b/googlesql/local_service/local_service_analysis.cc
+@@ -0,0 +1,803 @@
++//
++// Copyright 2019 Google LLC
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//      http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++//
++
++#include "googlesql/local_service/local_service_analysis.h"
++
++#include <algorithm>
++#include <cstddef>
++#include <cstdint>
++#include <memory>
++#include <optional>
++#include <string>
++#include <utility>
++#include <vector>
++
++#include "google/protobuf/descriptor.pb.h"
++#include "googlesql/common/errors.h"
++#include "googlesql/common/proto_helper.h"
++#include "googlesql/local_service/local_service.pb.h"
++#include "googlesql/local_service/state.h"
++#include "googlesql/parser/parse_tree_serializer.h"
++#include "googlesql/parser/parser.h"
++#include "googlesql/proto/simple_catalog.pb.h"
++#include "googlesql/public/analyzer.h"
++#include "googlesql/public/analyzer_output.h"
++#include "googlesql/public/builtin_function.h"
++#include "googlesql/public/builtin_function_options.h"
++#include "googlesql/public/constant_evaluator.h"
++#include "googlesql/public/formatter_options.h"
++#include "googlesql/public/function.h"
++#include "googlesql/public/id_string.h"
++#include "googlesql/public/language_options.h"
++#include "googlesql/public/lenient_formatter.h"
++#include "googlesql/public/property_graph.h"
++#include "googlesql/public/simple_catalog.h"
++#include "googlesql/public/simple_catalog_util.h"
++#include "googlesql/public/simple_table.pb.h"
++#include "googlesql/public/sql_formatter.h"
++#include "googlesql/public/table_from_proto.h"
++#include "googlesql/public/table_valued_function.h"
++#include "googlesql/public/type.h"
++#include "googlesql/public/type.pb.h"
++#include "googlesql/public/value.h"
++#include "googlesql/public/value.pb.h"
++#include "googlesql/resolved_ast/resolved_ast.h"
++#include "googlesql/resolved_ast/resolved_node.h"
++#include "googlesql/resolved_ast/sql_builder.h"
++#include "absl/cleanup/cleanup.h"
++#include "absl/container/flat_hash_map.h"
++#include "absl/container/flat_hash_set.h"
++#include "absl/functional/bind_front.h"
++#include "googlesql/base/check.h"
++#include "absl/memory/memory.h"
++#include "absl/status/status.h"
++#include "googlesql/base/status_macros.h"
++#include "absl/status/statusor.h"
++#include "absl/strings/str_cat.h"
++#include "absl/strings/string_view.h"
++#include "absl/types/optional.h"
++#include "googlesql/base/map_util.h"
++#include "googlesql/base/ret_check.h"
++#include "googlesql/base/status_builder.h"
++
++namespace googlesql {
++namespace local_service {
++
++namespace {
++
++absl::Status ResolvePropertyDefinitionsForSimpleCatalog(
++    const AnalyzerOptions& options, SimpleCatalog& catalog,
++    std::vector<std::unique_ptr<const AnalyzerOutput>>& artifacts) {
++  absl::flat_hash_set<const PropertyGraph*> graphs;
++  GOOGLESQL_RETURN_IF_ERROR(catalog.GetPropertyGraphs(&graphs));
++  for (const PropertyGraph* graph : graphs) {
++    GOOGLESQL_RETURN_IF_ERROR(ResolveGraphPropertyDefinitions(options.language(), graph,
++                                                    &catalog, artifacts));
++  }
++  return absl::OkStatus();
++}
++
++}  // namespace
++
++void PopulateExistingPoolsToFileDescriptorSetMap(
++    const std::vector<const google::protobuf::DescriptorPool*>& pools,
++    FileDescriptorSetMap* file_descriptor_set_map) {
++  file_descriptor_set_map->clear();
++
++  for (int i = 0; i < pools.size(); ++i) {
++    std::unique_ptr<Type::FileDescriptorEntry>& entry =
++        (*file_descriptor_set_map)[pools[i]];
++    ABSL_CHECK_EQ(entry.get(), nullptr);
++    entry = std::make_unique<Type::FileDescriptorEntry>();
++    entry->descriptor_set_index = i;
++  }
++
++  ABSL_CHECK_EQ(pools.size(), file_descriptor_set_map->size());
++}
++
++absl::StatusOr<std::unique_ptr<RegisteredDescriptorPoolState>>
++RegisteredDescriptorPoolState::Create(
++    const google::protobuf::FileDescriptorSet& fdset) {
++  auto pool = std::make_unique<google::protobuf::DescriptorPool>();
++  GOOGLESQL_RETURN_IF_ERROR(AddFileDescriptorSetToPool(&fdset, pool.get()));
++
++  return absl::WrapUnique(new RegisteredDescriptorPoolState(std::move(pool)));
++}
++
++const google::protobuf::DescriptorPool* RegisteredDescriptorPoolState::pool() {
++  if (is_builtin_) {
++    return google::protobuf::DescriptorPool::generated_pool();
++  } else {
++    return pool_.get();
++  }
++}
++
++RegisteredDescriptorPoolPool::RegisteredDescriptorPoolPool() {
++  int64_t id = Register(new RegisteredDescriptorPoolState(
++      RegisteredDescriptorPoolState::builtin_descriptor_pool_t()));
++  ABSL_CHECK_NE(id, -1);
++  builtin_pool_ = Get(id);
++}
++
++absl::StatusOr<std::unique_ptr<RegisteredCatalogState>>
++RegisteredCatalogState::Create(
++    const SimpleCatalogProto& proto,
++    const google::protobuf::Map<std::string, TableContent>& tables_contents,
++    const std::vector<const google::protobuf::DescriptorPool*>& pools,
++    absl::flat_hash_set<int64_t> owned_descriptor_pool_ids) {
++  std::unique_ptr<SimpleCatalog> catalog;
++
++  if (tables_contents.empty()) {
++    // If there are is no table content to be set then there is no need
++    // to serialize the Tables independently and we can deserialize
++    // the Catalog proto as it is
++    GOOGLESQL_RETURN_IF_ERROR(SimpleCatalog::Deserialize(proto, pools, &catalog));
++  } else {
++    // Make a copy of the original immutable Catalog proto, which will be
++    // mutable and will allow us to manipulate the tables' contents
++    SimpleCatalogProto proto_copy = proto;
++    proto_copy.clear_table();
++
++    // Deserialize the Catalog proto with the tables
++    GOOGLESQL_RETURN_IF_ERROR(SimpleCatalog::Deserialize(proto_copy, pools, &catalog));
++
++    // Deserialize each individual Table proto, set its content if provided
++    // and then add the Table to the Catalog
++    const TypeDeserializer type_deserializer =
++        TypeDeserializer(catalog->type_factory(), pools);
++    for (const SimpleTableProto& table_proto : proto.table()) {
++      const std::string& name = table_proto.has_name_in_catalog()
++                                    ? table_proto.name_in_catalog()
++                                    : table_proto.name();
++      GOOGLESQL_ASSIGN_OR_RETURN(std::unique_ptr<SimpleTable> table,
++                       DeserializeTable(name, table_proto, tables_contents,
++                                        type_deserializer));
++
++      if (!catalog->AddOwnedTableIfNotPresent(name, std::move(table))) {
++        return ::googlesql_base::InvalidArgumentErrorBuilder()
++               << "Duplicate table '" << name << "' in serialized catalog";
++      }
++    }
++  }
++
++  return absl::WrapUnique(new RegisteredCatalogState(
++      std::move(catalog), std::move(owned_descriptor_pool_ids)));
++}
++
++absl::StatusOr<std::unique_ptr<SimpleTable>>
++RegisteredCatalogState::DeserializeTable(
++    absl::string_view name, const SimpleTableProto& proto,
++    const google::protobuf::Map<std::string, TableContent>& tables_contents,
++    const TypeDeserializer& type_deserializer) {
++  GOOGLESQL_ASSIGN_OR_RETURN(std::unique_ptr<SimpleTable> table,
++                   SimpleTable::Deserialize(proto, type_deserializer));
++
++  const TableContent* table_content = googlesql_base::FindOrNull(tables_contents, name);
++  if (table_content == nullptr || !table_content->has_table_data()) {
++    return table;
++  }
++
++  const TableData& table_data = table_content->table_data();
++
++  std::vector<std::vector<Value>> content;
++  for (const auto& row : table_data.row()) {
++    std::vector<Value> googlesql_row;
++    for (int i = 0; i < row.cell_size(); i++) {
++      GOOGLESQL_ASSIGN_OR_RETURN(
++          auto googlesql_value,
++          Value::Deserialize(row.cell(i), table->GetColumn(i)->GetType()));
++      googlesql_row.push_back(googlesql_value);
++    }
++    content.push_back(std::move(googlesql_row));
++  }
++  table->SetContents(std::move(content));
++
++  return table;
++}
++
++GoogleSqlLocalServiceAnalysisImpl::GoogleSqlLocalServiceAnalysisImpl()
++    : registered_descriptor_pools_(new RegisteredDescriptorPoolPool()),
++      registered_catalogs_(new RegisteredCatalogPool()) {}
++
++GoogleSqlLocalServiceAnalysisImpl::~GoogleSqlLocalServiceAnalysisImpl() =
++    default;
++
++void GoogleSqlLocalServiceAnalysisImpl::CleanupCatalog(
++    std::optional<int64_t>* catalog_id) {
++  if (catalog_id->has_value()) {
++    registered_catalogs_->Delete(**catalog_id);
++  }
++}
++
++void GoogleSqlLocalServiceAnalysisImpl::CleanupDescriptorPools(
++    absl::flat_hash_set<int64_t>* descriptor_pool_ids) {
++  for (int64_t pool_id : *descriptor_pool_ids) {
++    registered_descriptor_pools_->Delete(pool_id);
++  }
++}
++
++absl::Status GoogleSqlLocalServiceAnalysisImpl::RegisterNewDescriptorPools(
++    std::vector<std::shared_ptr<RegisteredDescriptorPoolState>>&
++        descriptor_pool_states,
++    absl::flat_hash_set<int64_t>& registered_descriptor_pool_ids,
++    DescriptorPoolIdList& descriptor_pool_id_list) {
++  registered_descriptor_pool_ids.clear();
++  descriptor_pool_id_list.Clear();
++  for (std::shared_ptr<RegisteredDescriptorPoolState>& pool_state :
++       descriptor_pool_states) {
++    if (!pool_state->IsRegistered()) {
++      // Not registered, so we registered it, and own it.
++      int64_t pool_id = registered_descriptor_pools_->Register(pool_state);
++      GOOGLESQL_RET_CHECK_NE(-1, pool_id)
++          << "Failed to register descriptor pool, this shouldn't happen";
++      registered_descriptor_pool_ids.insert(pool_id);
++    }
++    descriptor_pool_id_list.add_registered_ids(pool_state->GetId());
++  }
++  return absl::OkStatus();
++}
++
++absl::StatusOr<std::unique_ptr<const ConstantEvaluator>>
++GoogleSqlLocalServiceAnalysisImpl::MaybeCreateConstantEvaluator(
++    const AnalyzerOptionsProto& options_proto, AnalyzerOptions* options) {
++  if (options_proto.use_constant_evaluator()) {
++    return ::googlesql_base::UnimplementedErrorBuilder()
++           << "use_constant_evaluator requires the evaluator-backed local "
++              "service (//googlesql/local_service:local_service)";
++  }
++  return nullptr;
++}
++
++absl::Status GoogleSqlLocalServiceAnalysisImpl::GetTableFromProto(
++    const TableFromProtoRequest& request, SimpleTableProto* response) {
++  TypeFactory factory;
++  google::protobuf::DescriptorPool pool;
++  GOOGLESQL_RETURN_IF_ERROR(
++      AddFileDescriptorSetToPool(&request.file_descriptor_set(), &pool));
++  const google::protobuf::Descriptor* proto_descr =
++      pool.FindMessageTypeByName(request.proto().proto_name());
++  if (proto_descr == nullptr) {
++    return ::googlesql_base::UnknownErrorBuilder()
++           << "Proto type name not found: " << request.proto().proto_name();
++  }
++  if (proto_descr->file()->name() != request.proto().proto_file_name()) {
++    return ::googlesql_base::UnknownErrorBuilder()
++           << "Proto " << request.proto().proto_name() << " found in "
++           << proto_descr->file()->name() << ", not "
++           << request.proto().proto_file_name() << " as specified.";
++  }
++  TableFromProto table(proto_descr->name());
++  GOOGLESQL_RETURN_IF_ERROR(table.Init(proto_descr, &factory));
++  FileDescriptorSetMap file_descriptor_set_map;
++  GOOGLESQL_RETURN_IF_ERROR(table.Serialize(&file_descriptor_set_map, response));
++  if (!file_descriptor_set_map.empty()) {
++    GOOGLESQL_RET_CHECK_EQ(1, file_descriptor_set_map.size())
++        << "Table from proto " << proto_descr->full_name()
++        << " uses unknown DescriptorPool, this shouldn't happen.";
++    GOOGLESQL_RET_CHECK_EQ(0, file_descriptor_set_map.at(&pool)->descriptor_set_index)
++        << "Table from proto " << proto_descr->full_name()
++        << " uses unknown DescriptorPool, this shouldn't happen.";
++  }
++  return absl::OkStatus();
++}
++
++absl::Status GoogleSqlLocalServiceAnalysisImpl::GetDescriptorPools(
++    const DescriptorPoolListProto& descriptor_pool_list,
++    std::vector<std::shared_ptr<RegisteredDescriptorPoolState>>&
++        descriptor_pool_states,
++    std::vector<const google::protobuf::DescriptorPool*>& descriptor_pools) {
++  using Definition = DescriptorPoolListProto::Definition;
++  descriptor_pool_states.clear();
++  descriptor_pools.clear();
++  for (const Definition& definition : descriptor_pool_list.definitions()) {
++    std::shared_ptr<RegisteredDescriptorPoolState> state;
++    switch (definition.definition_case()) {
++      case Definition::kFileDescriptorSet: {
++        GOOGLESQL_ASSIGN_OR_RETURN(state, RegisteredDescriptorPoolState::Create(
++                                    definition.file_descriptor_set()));
++        break;
++      }
++      case Definition::kRegisteredId: {
++        state = registered_descriptor_pools_->Get(definition.registered_id());
++        if (state == nullptr) {
++          return absl::Status(
++              absl::StatusCode::kInvalidArgument,
++              absl::StrCat("Invalid DescriptorPoolList::Definition: unknown "
++                           "registered_id",
++                           definition));
++        }
++        break;
++      }
++      case Definition::kBuiltin: {
++        state = registered_descriptor_pools_->GetBuiltinDescriptorPoolState();
++        break;
++      }
++      default:
++        return absl::Status(
++            absl::StatusCode::kInvalidArgument,
++            absl::StrCat(
++                "Invalid DescriptorPoolList::Definition contains unknown "
++                "definition type",
++                definition));
++    }
++    descriptor_pool_states.push_back(state);
++    GOOGLESQL_RET_CHECK_NE(state->pool(), nullptr);
++    descriptor_pools.push_back(state->pool());
++  }
++
++  return absl::OkStatus();
++}
++
++absl::Status GoogleSqlLocalServiceAnalysisImpl::Analyze(
++    const AnalyzeRequest& request, AnalyzeResponse* response) {
++  std::shared_ptr<RegisteredCatalogState> catalog_state;
++  std::vector<const google::protobuf::DescriptorPool*> pools;
++  std::vector<std::shared_ptr<RegisteredDescriptorPoolState>>
++      descriptor_pool_states;
++
++  GOOGLESQL_RETURN_IF_ERROR(GetDescriptorPools(request.descriptor_pool_list(),
++                                     descriptor_pool_states, pools));
++  GOOGLESQL_RETURN_IF_ERROR(GetCatalogState(request, {}, pools, catalog_state));
++  if (request.has_sql_expression()) {
++    return AnalyzeExpressionImpl(request, pools, catalog_state->GetCatalog(),
++                                 response);
++  } else {
++    return AnalyzeImpl(request, pools, catalog_state->GetCatalog(), response);
++  }
++}
++
++absl::Status GoogleSqlLocalServiceAnalysisImpl::AnalyzeImpl(
++    const AnalyzeRequest& request,
++    const std::vector<const google::protobuf::DescriptorPool*>& pools, Catalog* catalog,
++    AnalyzeResponse* response) {
++  GOOGLESQL_RET_CHECK(catalog->Is<SimpleCatalog>());
++  GOOGLESQL_RET_CHECK_NE(catalog, nullptr);
++
++  AnalyzerOptions options;
++  TypeFactory factory;
++  GOOGLESQL_RETURN_IF_ERROR(AnalyzerOptions::Deserialize(request.options(), pools,
++                                               &factory, &options));
++  std::vector<std::unique_ptr<const AnalyzerOutput>> property_graph_artifacts;
++  GOOGLESQL_RETURN_IF_ERROR(ResolvePropertyDefinitionsForSimpleCatalog(
++      options, *catalog->GetAs<SimpleCatalog>(), property_graph_artifacts));
++  GOOGLESQL_ASSIGN_OR_RETURN(
++      std::unique_ptr<const ConstantEvaluator> constant_evaluator,
++      MaybeCreateConstantEvaluator(request.options(), &options));
++
++  if (!(request.has_sql_statement() || request.has_parse_resume_location())) {
++    return ::googlesql_base::UnknownErrorBuilder()
++           << "Unrecognized AnalyzeRequest target " << request.target_case();
++  }
++  std::unique_ptr<const AnalyzerOutput> output;
++
++  if (request.has_sql_statement()) {
++    absl::string_view sql = request.sql_statement();
++
++    GOOGLESQL_RETURN_IF_ERROR(
++        googlesql::AnalyzeStatement(sql, options, catalog, &factory, &output));
++
++    GOOGLESQL_RETURN_IF_ERROR(
++        SerializeResolvedOutput(output.get(), pools, sql, response));
++  } else if (request.has_parse_resume_location()) {
++    bool at_end_of_input;
++    ParseResumeLocation location =
++        ParseResumeLocation::FromProto(request.parse_resume_location());
++    GOOGLESQL_RETURN_IF_ERROR(googlesql::AnalyzeNextStatement(
++        &location, options, catalog, &factory, &output, &at_end_of_input));
++
++    GOOGLESQL_RETURN_IF_ERROR(SerializeResolvedOutput(output.get(), pools,
++                                            location.input(), response));
++    response->set_resume_byte_position(location.byte_position());
++  }
++  return absl::OkStatus();
++}
++
++absl::Status GoogleSqlLocalServiceAnalysisImpl::AnalyzeExpressionImpl(
++    const AnalyzeRequest& request,
++    const std::vector<const google::protobuf::DescriptorPool*>& pools, Catalog* catalog,
++    AnalyzeResponse* response) {
++  GOOGLESQL_RET_CHECK(catalog->Is<SimpleCatalog>());
++  GOOGLESQL_RET_CHECK_NE(catalog, nullptr);
++
++  AnalyzerOptions options;
++  TypeFactory factory;
++  GOOGLESQL_RETURN_IF_ERROR(AnalyzerOptions::Deserialize(request.options(), pools,
++                                               &factory, &options));
++  std::vector<std::unique_ptr<const AnalyzerOutput>> property_graph_artifacts;
++  GOOGLESQL_RETURN_IF_ERROR(ResolvePropertyDefinitionsForSimpleCatalog(
++      options, *catalog->GetAs<SimpleCatalog>(), property_graph_artifacts));
++  GOOGLESQL_ASSIGN_OR_RETURN(
++      std::unique_ptr<const ConstantEvaluator> constant_evaluator,
++      MaybeCreateConstantEvaluator(request.options(), &options));
++
++  if (request.has_sql_expression()) {
++    std::unique_ptr<const AnalyzerOutput> output;
++    TypeFactory factory;
++
++    absl::string_view sql = request.sql_expression();
++
++    GOOGLESQL_RETURN_IF_ERROR(
++        googlesql::AnalyzeExpression(sql, options, catalog, &factory, &output));
++
++    GOOGLESQL_RETURN_IF_ERROR(
++        SerializeResolvedOutput(output.get(), pools, sql, response));
++  }
++  return absl::OkStatus();
++}
++
++absl::Status GoogleSqlLocalServiceAnalysisImpl::BuildSql(
++    const BuildSqlRequest& request, BuildSqlResponse* response) {
++  std::shared_ptr<RegisteredCatalogState> catalog_state;
++  std::vector<const google::protobuf::DescriptorPool*> pools;
++
++  std::vector<std::shared_ptr<RegisteredDescriptorPoolState>>
++      descriptor_pool_states;
++
++  GOOGLESQL_RETURN_IF_ERROR(GetDescriptorPools(request.descriptor_pool_list(),
++                                     descriptor_pool_states, pools));
++  GOOGLESQL_RETURN_IF_ERROR(GetCatalogState(request, {}, pools, catalog_state));
++  IdStringPool string_pool;
++  ResolvedNode::RestoreParams restore_params(
++      pools, catalog_state->GetCatalog(),
++      catalog_state->GetCatalog()->type_factory(), &string_pool);
++
++  std::unique_ptr<ResolvedNode> ast;
++  if (request.has_resolved_statement()) {
++    GOOGLESQL_ASSIGN_OR_RETURN(std::unique_ptr<ResolvedStatement> statement,
++                     ResolvedStatement::RestoreFrom(
++                         request.resolved_statement(), restore_params));
++    ast = std::move(statement);
++  } else if (request.has_resolved_expression()) {
++    GOOGLESQL_ASSIGN_OR_RETURN(std::unique_ptr<ResolvedExpr> expression,
++                     ResolvedExpr::RestoreFrom(request.resolved_expression(),
++                                               restore_params));
++    ast = std::move(expression);
++  } else {
++    return absl::OkStatus();
++  }
++
++  googlesql::SQLBuilder::SQLBuilderOptions builder_options;
++  builder_options.catalog = catalog_state->GetCatalog();
++  googlesql::SQLBuilder sql_builder(builder_options);
++
++  GOOGLESQL_CHECK_OK(ast->Accept(&sql_builder));
++  response->set_sql(sql_builder.sql());
++  return absl::OkStatus();
++}
++
++absl::Status GoogleSqlLocalServiceAnalysisImpl::ExtractTableNamesFromStatement(
++    const ExtractTableNamesFromStatementRequest& request,
++    ExtractTableNamesFromStatementResponse* response) {
++  LanguageOptions language_options = request.has_options()
++                                         ? LanguageOptions(request.options())
++                                         : LanguageOptions();
++
++  googlesql::TableNamesSet table_names;
++  if (request.allow_script()) {
++    GOOGLESQL_RETURN_IF_ERROR(googlesql::ExtractTableNamesFromScript(
++        request.sql_statement(), googlesql::AnalyzerOptions(language_options),
++        &table_names));
++  } else {
++    GOOGLESQL_RETURN_IF_ERROR(googlesql::ExtractTableNamesFromStatement(
++        request.sql_statement(), googlesql::AnalyzerOptions(language_options),
++        &table_names));
++  }
++  for (const std::vector<std::string>& table_name : table_names) {
++    ExtractTableNamesFromStatementResponse_TableName* table_name_field =
++        response->add_table_name();
++    for (const std::string& name_segment : table_name) {
++      table_name_field->add_table_name_segment(name_segment);
++    }
++  }
++  return absl::OkStatus();
++}
++
++absl::Status
++GoogleSqlLocalServiceAnalysisImpl::ExtractTableNamesFromNextStatement(
++    const ExtractTableNamesFromNextStatementRequest& request,
++    ExtractTableNamesFromNextStatementResponse* response) {
++  ParseResumeLocation location =
++      ParseResumeLocation::FromProto(request.parse_resume_location());
++
++  LanguageOptions language_options = request.has_options()
++                                         ? LanguageOptions(request.options())
++                                         : LanguageOptions();
++
++  bool at_end_of_input;
++  googlesql::TableNamesSet table_names;
++  GOOGLESQL_RETURN_IF_ERROR(googlesql::ExtractTableNamesFromNextStatement(
++      &location, googlesql::AnalyzerOptions(language_options), &table_names,
++      &at_end_of_input));
++
++  for (const std::vector<std::string>& table_name : table_names) {
++    ExtractTableNamesFromNextStatementResponse_TableName* table_name_field =
++        response->add_table_name();
++    for (const std::string& name_segment : table_name) {
++      table_name_field->add_table_name_segment(name_segment);
++    }
++  }
++
++  response->set_resume_byte_position(location.byte_position());
++
++  return absl::OkStatus();
++}
++
++absl::Status GoogleSqlLocalServiceAnalysisImpl::SerializeResolvedOutput(
++    const AnalyzerOutput* output,
++    const std::vector<const google::protobuf::DescriptorPool*>& pools,
++    absl::string_view statement, AnalyzeResponse* response) {
++  FileDescriptorSetMap file_descriptor_set_map;
++  PopulateExistingPoolsToFileDescriptorSetMap(pools, &file_descriptor_set_map);
++
++  if (output->resolved_statement() != nullptr) {
++    GOOGLESQL_RETURN_IF_ERROR(output->resolved_statement()->SaveTo(
++        &file_descriptor_set_map, response->mutable_resolved_statement()));
++  } else {
++    GOOGLESQL_RETURN_IF_ERROR(output->resolved_expr()->SaveTo(
++        &file_descriptor_set_map, response->mutable_resolved_expression()));
++  }
++
++  // If the file_descriptor_set_map contains more descriptor pools than those
++  // passed in the request, the additional one must be the generated descriptor
++  // pool. The reason is that some built-in functions use the DatetimePart
++  // enum whose descriptor comes from the generated pool.
++  // TODO: Describe the descriptor pool passing contract in detail
++  // with a doc, and put a link here.
++  if (file_descriptor_set_map.size() != pools.size()) {
++    GOOGLESQL_RET_CHECK_EQ(file_descriptor_set_map.size(), pools.size() + 1)
++        << "Analyzer result of " << statement
++        << " uses unknown DescriptorPool, this shouldn't happen.";
++    const auto& entry =
++        file_descriptor_set_map.at(google::protobuf::DescriptorPool::generated_pool());
++    GOOGLESQL_RET_CHECK_NE(entry.get(), nullptr)
++        << "Analyzer result of " << statement
++        << " uses unknown DescriptorPool, this shouldn't happen.";
++    GOOGLESQL_RET_CHECK_EQ(entry->descriptor_set_index, pools.size())
++        << "Analyzer result of " << statement
++        << " uses unknown DescriptorPool, this shouldn't happen.";
++  }
++
++  return absl::OkStatus();
++}
++
++absl::Status GoogleSqlLocalServiceAnalysisImpl::FormatSql(
++    const FormatSqlRequest& request, FormatSqlResponse* response) {
++  return ::googlesql::FormatSql(request.sql(), response->mutable_sql());
++}
++
++absl::Status GoogleSqlLocalServiceAnalysisImpl::LenientFormatSql(
++    const FormatSqlRequest& request, FormatSqlResponse* response) {
++  ::googlesql::FormatterOptions options(request.options());
++  std::vector<FormatterRange> ranges(request.byte_ranges_size());
++  std::transform(request.byte_ranges().begin(), request.byte_ranges().end(),
++                 ranges.begin(), [](FormatterRangeProto f) {
++                   return FormatterRange({.start = f.start(), .end = f.end()});
++                 });
++  absl::StatusOr<std::string> result =
++      ::googlesql::LenientFormatSqlByteRanges(request.sql(), ranges, options);
++  if (result.ok()) {
++    response->set_sql(result.value());
++  }
++  return result.status();
++}
++
++absl::Status GoogleSqlLocalServiceAnalysisImpl::RegisterCatalog(
++    const RegisterCatalogRequest& request, RegisterResponse* response) {
++  std::vector<std::shared_ptr<RegisteredDescriptorPoolState>>
++      descriptor_pool_states;
++  std::vector<const google::protobuf::DescriptorPool*> pools;
++
++  GOOGLESQL_RETURN_IF_ERROR(GetDescriptorPools(request.descriptor_pool_list(),
++                                     descriptor_pool_states, pools));
++
++  absl::flat_hash_set<int64_t> owned_descriptor_pool_ids;
++  // On error, make sure we don't leak any registered descriptor pools.
++  auto descriptor_pool_cleanup = absl::MakeCleanup(absl::bind_front(
++      &GoogleSqlLocalServiceAnalysisImpl::CleanupDescriptorPools, this,
++      &owned_descriptor_pool_ids));
++  for (std::shared_ptr<RegisteredDescriptorPoolState>& pool_state :
++       descriptor_pool_states) {
++    if (!pool_state->IsRegistered()) {
++      // Not registered, so we registered it, and own it.
++      int64_t pool_id = registered_descriptor_pools_->Register(pool_state);
++      GOOGLESQL_RET_CHECK_NE(-1, pool_id)
++          << "Failed to register descriptor pool, this shouldn't happen";
++      owned_descriptor_pool_ids.insert(pool_id);
++    }
++    response->mutable_descriptor_pool_id_list()->add_registered_ids(
++        pool_state->GetId());
++  }
++
++  GOOGLESQL_ASSIGN_OR_RETURN(std::unique_ptr<RegisteredCatalogState> state,
++                   RegisteredCatalogState::Create(
++                       request.simple_catalog(), request.table_content(), pools,
++                       owned_descriptor_pool_ids));
++  int64_t id = registered_catalogs_->Register(std::move(state));
++  GOOGLESQL_RET_CHECK_NE(-1, id) << "Failed to register catalog, this shouldn't happen.";
++
++  response->set_registered_id(id);
++  // No errors, caller is now responsible for the prepared expression and
++  // therefore any owned descriptor pools.
++  std::move(descriptor_pool_cleanup).Cancel();
++
++  return absl::OkStatus();
++}
++
++absl::Status GoogleSqlLocalServiceAnalysisImpl::UnregisterCatalog(int64_t id) {
++  std::shared_ptr<RegisteredCatalogState> state = registered_catalogs_->Get(id);
++  if (state == nullptr) {
++    return MakeSqlError() << "Unknown catalog ID: " << id;
++  }
++
++  absl::Status status;
++  for (int64_t pool_id : state->owned_descriptor_pool_ids()) {
++    if (!registered_descriptor_pools_->Delete(pool_id)) {
++      status = MakeSqlError() << "Unknown descriptor pool ID: " << pool_id;
++    }
++  }
++  if (!registered_catalogs_->Delete(id)) {
++    status = MakeSqlError() << "Failed to fully delete catalog ID: " << id;
++  }
++  return status;
++}
++
++absl::Status GoogleSqlLocalServiceAnalysisImpl::GetBuiltinFunctions(
++    const GoogleSQLBuiltinFunctionOptionsProto& proto,
++    GetBuiltinFunctionsResponse* resp) {
++  TypeFactory factory;
++  absl::flat_hash_map<std::string, std::unique_ptr<Function>> functions;
++  absl::flat_hash_map<std::string, std::unique_ptr<TableValuedFunction>>
++      table_valued_functions;
++  BuiltinFunctionOptions options(proto);
++  absl::flat_hash_map<std::string, const Type*> types;
++
++  GOOGLESQL_RETURN_IF_ERROR(GetBuiltinFunctionsAndTypes(options, factory, functions,
++                                              types, table_valued_functions));
++
++  FileDescriptorSetMap file_descriptor_set_map;
++  for (const auto& function : functions) {
++    GOOGLESQL_RETURN_IF_ERROR(function.second->Serialize(&file_descriptor_set_map,
++                                               resp->add_function()));
++  }
++
++  for (const auto& table_valued_function : table_valued_functions) {
++    GOOGLESQL_RETURN_IF_ERROR(table_valued_function.second->Serialize(
++        &file_descriptor_set_map, resp->add_table_valued_function()));
++  }
++
++  auto& response_types = *resp->mutable_types();
++  for (const auto& [name, type] : types) {
++    TypeProto& type_proto = response_types[name];
++    GOOGLESQL_RETURN_IF_ERROR(type->SerializeToProtoAndDistinctFileDescriptors(
++        &type_proto, &file_descriptor_set_map));
++  }
++
++  return absl::OkStatus();
++}
++
++absl::Status GoogleSqlLocalServiceAnalysisImpl::GetLanguageOptions(
++    const LanguageOptionsRequest& request, LanguageOptionsProto* response) {
++  googlesql::LanguageOptions options;
++  if (request.has_maximum_features() && request.maximum_features()) {
++    options.EnableMaximumLanguageFeatures();
++  }
++  if (request.has_language_version()) {
++    options.SetLanguageVersion(request.language_version());
++  }
++  options.Serialize(response);
++  return absl::OkStatus();
++}
++
++absl::Status GoogleSqlLocalServiceAnalysisImpl::GetAnalyzerOptions(
++    const AnalyzerOptionsRequest& request, AnalyzerOptionsProto* response) {
++  googlesql::AnalyzerOptions options;
++  FileDescriptorSetMap unused_map;
++  return options.Serialize(&unused_map, response);
++}
++
++absl::Status GoogleSqlLocalServiceAnalysisImpl::Parse(
++    const ParseRequest& request, ParseResponse* response) {
++  auto language_options =
++      request.has_options()
++          ? std::make_unique<LanguageOptions>(request.options())
++          : std::make_unique<LanguageOptions>();
++
++  ParserOptions parser_options = ParserOptions(
++      /*id_string_pool=*/nullptr, /*arena=*/nullptr,
++      language_options ? *language_options : LanguageOptions());
++
++  if (request.allow_script()) {
++    return ParseScriptImpl(request, response, parser_options);
++  } else {
++    return ParseStatementImpl(request, response, parser_options);
++  }
++}
++
++absl::Status GoogleSqlLocalServiceAnalysisImpl::ParseStatementImpl(
++    const ParseRequest& request, ParseResponse* response,
++    ParserOptions& parser_options) {
++  std::unique_ptr<ParserOutput> parser_output;
++
++  if (request.has_sql_statement()) {
++    absl::string_view sql = request.sql_statement();
++
++    GOOGLESQL_RETURN_IF_ERROR(ParseStatement(sql, parser_options, &parser_output));
++
++    return ParseTreeSerializer::Serialize(parser_output->statement(),
++                                          response->mutable_parsed_statement());
++  } else if (request.has_parse_resume_location()) {
++    bool at_end_of_input;
++    ParseResumeLocation location =
++        ParseResumeLocation::FromProto(request.parse_resume_location());
++    GOOGLESQL_RETURN_IF_ERROR(ParseNextStatement(&location, parser_options,
++                                       &parser_output, &at_end_of_input));
++
++    response->set_resume_byte_position(location.byte_position());
++    return ParseTreeSerializer::Serialize(parser_output->statement(),
++                                          response->mutable_parsed_statement());
++  } else {
++    return ::googlesql_base::UnknownErrorBuilder() << "ParseRequest target not set";
++  }
++
++  return absl::OkStatus();
++}
++
++absl::Status GoogleSqlLocalServiceAnalysisImpl::ParseScriptImpl(
++    const ParseRequest& request, ParseResponse* response,
++    ParserOptions& parser_options) {
++  std::unique_ptr<ParserOutput> parser_output;
++
++  if (request.has_sql_statement()) {
++    absl::string_view sql = request.sql_statement();
++
++    GOOGLESQL_RETURN_IF_ERROR(
++        ParseScript(sql, parser_options,
++                    {.mode = ErrorMessageMode::ERROR_MESSAGE_ONE_LINE,
++                     .attach_error_location_payload =
++                         (ErrorMessageMode::ERROR_MESSAGE_ONE_LINE ==
++                          ErrorMessageMode::ERROR_MESSAGE_WITH_PAYLOAD),
++                     .stability = GetDefaultErrorMessageStability()},
++                    &parser_output));
++
++    return ParseTreeSerializer::Serialize(parser_output->script(),
++                                          response->mutable_parsed_script());
++  } else if (request.has_parse_resume_location()) {
++    bool at_end_of_input;
++    ParseResumeLocation location =
++        ParseResumeLocation::FromProto(request.parse_resume_location());
++    GOOGLESQL_RETURN_IF_ERROR(ParseNextScriptStatement(&location, parser_options,
++                                             &parser_output, &at_end_of_input));
++
++    response->set_resume_byte_position(location.byte_position());
++    return ParseTreeSerializer::Serialize(parser_output->statement(),
++                                          response->mutable_parsed_statement());
++  } else {
++    return ::googlesql_base::UnknownErrorBuilder() << "ParseRequest target not set";
++  }
++
++  return absl::OkStatus();
++}
++
++size_t GoogleSqlLocalServiceAnalysisImpl::NumRegisteredDescriptorPools() const {
++  return registered_descriptor_pools_->NumSavedStates();
++}
++
++size_t GoogleSqlLocalServiceAnalysisImpl::NumRegisteredCatalogs() const {
++  return registered_catalogs_->NumSavedStates();
++}
++
++}  // namespace local_service
++}  // namespace googlesql
+diff --git a/googlesql/local_service/local_service_analysis.h b/googlesql/local_service/local_service_analysis.h
+new file mode 100644
+index 000000000..4fd199d71
+--- /dev/null
++++ b/googlesql/local_service/local_service_analysis.h
+@@ -0,0 +1,306 @@
++//
++// Copyright 2019 Google LLC
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//      http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++//
++
++#ifndef GOOGLESQL_LOCAL_SERVICE_LOCAL_SERVICE_ANALYSIS_H_
++#define GOOGLESQL_LOCAL_SERVICE_LOCAL_SERVICE_ANALYSIS_H_
++
++#include <stddef.h>
++
++#include <cstdint>
++#include <memory>
++#include <optional>
++#include <string>
++#include <vector>
++
++#include "google/protobuf/descriptor.pb.h"
++#include "google/protobuf/descriptor.h"
++#include "googlesql/common/errors.h"
++#include "googlesql/local_service/local_service.pb.h"
++#include "googlesql/local_service/state.h"
++#include "googlesql/proto/options.pb.h"
++#include "googlesql/public/analyzer.h"
++#include "googlesql/public/constant_evaluator.h"
++#include "googlesql/public/parse_resume_location.h"
++#include "googlesql/public/parse_resume_location.pb.h"
++#include "googlesql/public/simple_catalog.h"
++#include "googlesql/public/simple_table.pb.h"
++#include "googlesql/public/type.h"
++#include "absl/container/flat_hash_set.h"
++#include "absl/status/status.h"
++#include "absl/status/statusor.h"
++#include "absl/strings/string_view.h"
++#include "googlesql/base/status.h"
++#include "googlesql/base/status_macros.h"
++
++namespace googlesql {
++namespace local_service {
++
++// Populate the existing pools into the map with existing indices, to make sure
++// the serialized type will use the same indices.
++//
++// Shared between the analysis-only local service implementation below and the
++// evaluator-backed GoogleSqlLocalServiceImpl.
++void PopulateExistingPoolsToFileDescriptorSetMap(
++    const std::vector<const google::protobuf::DescriptorPool*>& pools,
++    FileDescriptorSetMap* file_descriptor_set_map);
++
++class RegisteredDescriptorPoolState : public GenericState {
++ public:
++  RegisteredDescriptorPoolState() = delete;
++  RegisteredDescriptorPoolState(const RegisteredDescriptorPoolState&) = delete;
++
++  RegisteredDescriptorPoolState& operator=(
++      const RegisteredDescriptorPoolState&) = delete;
++
++  static absl::StatusOr<std::unique_ptr<RegisteredDescriptorPoolState>> Create(
++      const google::protobuf::FileDescriptorSet& fdset);
++
++  const google::protobuf::DescriptorPool* pool();
++
++ private:
++  friend class RegisteredDescriptorPoolPool;
++  class builtin_descriptor_pool_t {};
++  explicit RegisteredDescriptorPoolState(builtin_descriptor_pool_t)
++      : is_builtin_(true) {}
++  explicit RegisteredDescriptorPoolState(
++      std::unique_ptr<const google::protobuf::DescriptorPool> pool)
++      : pool_(std::move(pool)), is_builtin_(false) {}
++  const std::unique_ptr<const google::protobuf::DescriptorPool> pool_ = nullptr;
++  const bool is_builtin_ = false;
++};
++
++class RegisteredDescriptorPoolPool
++    : public SharedStatePool<RegisteredDescriptorPoolState> {
++ public:
++  RegisteredDescriptorPoolPool();
++
++  std::shared_ptr<RegisteredDescriptorPoolState>
++  GetBuiltinDescriptorPoolState() {
++    return builtin_pool_;
++  }
++
++ private:
++  std::shared_ptr<RegisteredDescriptorPoolState> builtin_pool_;
++};
++
++class RegisteredCatalogState : public GenericState {
++ public:
++  RegisteredCatalogState() = delete;
++  RegisteredCatalogState(const RegisteredCatalogState&) = delete;
++  RegisteredCatalogState& operator=(const RegisteredCatalogState&) = delete;
++
++  static absl::StatusOr<std::unique_ptr<RegisteredCatalogState>> Create(
++      const SimpleCatalogProto& proto,
++      const google::protobuf::Map<std::string, TableContent>& tables_contents,
++      const std::vector<const google::protobuf::DescriptorPool*>& pools,
++      absl::flat_hash_set<int64_t> owned_descriptor_pool_ids = {});
++
++  // Ideally, this would be const, however, the googlesql analyzer API
++  // requires this be mutable (even though it does ever mutate anything).
++  SimpleCatalog* GetCatalog() { return catalog_.get(); }
++
++  const absl::flat_hash_set<int64_t>& owned_descriptor_pool_ids() const {
++    return owned_descriptor_pool_ids_;
++  }
++
++ private:
++  RegisteredCatalogState(std::unique_ptr<SimpleCatalog> catalog,
++                         absl::flat_hash_set<int64_t> owned_descriptor_pool_ids)
++      : catalog_(std::move(catalog)),
++        owned_descriptor_pool_ids_(std::move(owned_descriptor_pool_ids)) {}
++
++  static absl::StatusOr<std::unique_ptr<SimpleTable>> DeserializeTable(
++      absl::string_view name, const SimpleTableProto& proto,
++      const google::protobuf::Map<std::string, TableContent>& tables_contents,
++      const TypeDeserializer& type_deserializer);
++
++  const std::unique_ptr<SimpleCatalog> catalog_;
++  const absl::flat_hash_set<int64_t> owned_descriptor_pool_ids_;
++};
++
++class RegisteredCatalogPool : public SharedStatePool<RegisteredCatalogState> {};
++
++// Implementation of the analysis-side RPCs of the GoogleSqlLocalService RPC
++// service: everything except the Prepare/Evaluate/Unprepare RPC families,
++// which are implemented by the GoogleSqlLocalServiceImpl subclass.
++//
++// This class has no dependency on the evaluator or the reference
++// implementation, so consumers that only parse and analyze SQL can depend on
++// //googlesql/local_service:local_service_analysis and avoid compiling the
++// evaluator.
++class GoogleSqlLocalServiceAnalysisImpl {
++ public:
++  GoogleSqlLocalServiceAnalysisImpl();
++  GoogleSqlLocalServiceAnalysisImpl(const GoogleSqlLocalServiceAnalysisImpl&) =
++      delete;
++  GoogleSqlLocalServiceAnalysisImpl& operator=(
++      const GoogleSqlLocalServiceAnalysisImpl&) = delete;
++  virtual ~GoogleSqlLocalServiceAnalysisImpl();
++
++  absl::Status GetTableFromProto(const TableFromProtoRequest& request,
++                                 SimpleTableProto* response);
++
++  absl::Status GetBuiltinFunctions(
++      const GoogleSQLBuiltinFunctionOptionsProto& proto,
++      GetBuiltinFunctionsResponse* resp);
++
++  absl::Status Analyze(const AnalyzeRequest& request,
++                       AnalyzeResponse* response);
++
++  absl::Status AnalyzeImpl(
++      const AnalyzeRequest& request,
++      const std::vector<const google::protobuf::DescriptorPool*>& pools,
++      // Analyzer requires a non-const catalog, however
++      // is not mutated in practice.
++      Catalog* catalog, AnalyzeResponse* response);
++
++  absl::Status AnalyzeExpressionImpl(
++      const AnalyzeRequest& request,
++      const std::vector<const google::protobuf::DescriptorPool*>& pools,
++      // Analyzer requires a non-const catalog, however
++      // is not mutated in practice.
++      Catalog* catalog, AnalyzeResponse* response);
++
++  absl::Status BuildSql(const BuildSqlRequest& request,
++                        BuildSqlResponse* response);
++
++  // Note, this also can handle scripts.
++  absl::Status ExtractTableNamesFromStatement(
++      const ExtractTableNamesFromStatementRequest& request,
++      ExtractTableNamesFromStatementResponse* response);
++
++  // Note, this does not handle scripts.
++  absl::Status ExtractTableNamesFromNextStatement(
++      const ExtractTableNamesFromNextStatementRequest& request,
++      ExtractTableNamesFromNextStatementResponse* response);
++
++  absl::Status SerializeResolvedOutput(
++      const AnalyzerOutput* output,
++      const std::vector<const google::protobuf::DescriptorPool*>& pools,
++      absl::string_view statement, AnalyzeResponse* response);
++
++  absl::Status FormatSql(const FormatSqlRequest& request,
++                         FormatSqlResponse* response);
++
++  absl::Status LenientFormatSql(const FormatSqlRequest& request,
++                                FormatSqlResponse* response);
++
++  absl::Status RegisterCatalog(const RegisterCatalogRequest& request,
++                               RegisterResponse* response);
++
++  absl::Status UnregisterCatalog(int64_t id);
++
++  absl::Status GetLanguageOptions(const LanguageOptionsRequest& request,
++                                  LanguageOptionsProto* response);
++
++  absl::Status GetAnalyzerOptions(const AnalyzerOptionsRequest& request,
++                                  AnalyzerOptionsProto* response);
++
++  absl::Status Parse(const ParseRequest& request, ParseResponse* response);
++
++  absl::Status ParseStatementImpl(const ParseRequest& request,
++                                  ParseResponse* response,
++                                  ParserOptions& parser_options);
++
++  absl::Status ParseScriptImpl(const ParseRequest& request,
++                               ParseResponse* response,
++                               ParserOptions& parser_options);
++
++ protected:
++  // Fetches the descriptor pools for the given descriptor_pool_list.
++  // descriptor_pools is a view into pool_states_out, and is returned as a
++  // convenience for calls into the google Deserialize calls..
++  // This will _not_ register the returned states, although it will retrieve
++  // states based on registered_id as necessary.
++  absl::Status GetDescriptorPools(
++      const DescriptorPoolListProto& descriptor_pool_list,
++      std::vector<std::shared_ptr<RegisteredDescriptorPoolState>>&
++          pool_states_out,
++      std::vector<const google::protobuf::DescriptorPool*>& descriptor_pools);
++
++  // Registers each entry in <descriptor_pool_states> if not already registered
++  // and returns a list of the newly registered objects in
++  // <owned_descriptor_pool_ids>.
++  // Also sets <descriptor_pool_id_list> to the appropriate ids as a
++  // convenience.
++  absl::Status RegisterNewDescriptorPools(
++      std::vector<std::shared_ptr<RegisteredDescriptorPoolState>>&
++          descriptor_pool_states,
++      absl::flat_hash_set<int64_t>& registered_descriptor_pool_ids,
++      DescriptorPoolIdList& descriptor_pool_id_list);
++
++  template <typename RequestProto>
++  absl::Status GetCatalogState(
++      const RequestProto& request,
++      const google::protobuf::Map<std::string, TableContent>& tables_contents,
++      const std::vector<const google::protobuf::DescriptorPool*>& pools,
++      std::shared_ptr<RegisteredCatalogState>& state);
++
++  void CleanupDescriptorPools(
++      absl::flat_hash_set<int64_t>* descriptor_pool_ids);
++
++  void CleanupCatalog(std::optional<int64_t>* catalog_id);
++
++  // If <options_proto> requests a constant evaluator, creates one, sets it on
++  // <options> and returns it (the caller keeps it alive for as long as
++  // <options> is used); otherwise returns nullptr.
++  //
++  // Evaluating constants requires the evaluator, which this analysis-only
++  // class does not depend on, so this implementation returns an error when a
++  // constant evaluator is requested. GoogleSqlLocalServiceImpl overrides it
++  // with an evaluator-backed implementation.
++  virtual absl::StatusOr<std::unique_ptr<const ConstantEvaluator>>
++  MaybeCreateConstantEvaluator(const AnalyzerOptionsProto& options_proto,
++                               AnalyzerOptions* options);
++
++  // For testing.
++  size_t NumRegisteredDescriptorPools() const;
++  size_t NumRegisteredCatalogs() const;
++
++  std::unique_ptr<RegisteredDescriptorPoolPool> registered_descriptor_pools_;
++  std::unique_ptr<RegisteredCatalogPool> registered_catalogs_;
++};
++
++template <typename RequestProto>
++absl::Status GoogleSqlLocalServiceAnalysisImpl::GetCatalogState(
++    const RequestProto& request,
++    const google::protobuf::Map<std::string, TableContent>& tables_contents,
++    const std::vector<const google::protobuf::DescriptorPool*>& pools,
++    std::shared_ptr<RegisteredCatalogState>& state) {
++  if (request.has_registered_catalog_id()) {
++    // At the moment there is no support for updating the tables' contents
++    // of a registered catalog
++    if (!tables_contents.empty()) {
++      return MakeSqlError() << "Modifying the content of a registered catalog "
++                               "is not supported";
++    }
++    int64_t id = request.registered_catalog_id();
++    state = registered_catalogs_->Get(id);
++    if (state == nullptr) {
++      return MakeSqlError() << "Registered catalog " << id << " unknown.";
++    }
++  } else {
++    GOOGLESQL_ASSIGN_OR_RETURN(state,
++                     RegisteredCatalogState::Create(request.simple_catalog(),
++                                                    tables_contents, pools));
++  }
++  return absl::OkStatus();
++}
++
++}  // namespace local_service
++}  // namespace googlesql
++
++#endif  // GOOGLESQL_LOCAL_SERVICE_LOCAL_SERVICE_ANALYSIS_H_

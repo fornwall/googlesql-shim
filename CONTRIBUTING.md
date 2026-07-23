@@ -3,9 +3,13 @@
 This repository holds the build pipeline for prebuilt static GoogleSQL shim
 archives consumed by [smallquery](https://github.com/fornwall/smallquery).
 Changes to the shim's *behaviour* usually belong in smallquery (whose
-`crates/googlesql-sys/shim` these sources originate from) or upstream in
-[fornwall/googlesql](https://github.com/fornwall/googlesql); changes to how
-the archives are built, packaged and released belong here.
+`crates/googlesql-sys/shim` these sources originate from). Changes to GoogleSQL
+itself go upstream as pull requests against
+[fornwall/googlesql](https://github.com/fornwall/googlesql) and are applied to
+the pinned `google/googlesql` commit as the patches in `patches/googlesql/`
+(refresh them with `create-patches.sh`, and keep the `patches = [...]` list in
+`MODULE.bazel` in sync). Changes to how the archives are built, packaged and
+released belong here.
 
 ## Checks
 
@@ -17,7 +21,7 @@ shellcheck on every push to main and every pull request. To run them locally:
 actionlint
 buildifier -mode=check -lint=warn -r .
 clang-format --dry-run --Werror shim/shim.cc shim/shim.h
-shellcheck scripts/*.sh
+git ls-files '*.sh' | xargs shellcheck
 ```
 
 ## Developer Certificate of Origin

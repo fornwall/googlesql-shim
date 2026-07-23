@@ -1,0 +1,150 @@
+From 7cc21c0902b993795f6bd9ad4c6c95f8dd6f0af4 Mon Sep 17 00:00:00 2001
+From: Fredrik Fornwall <fredrik@fornwall.net>
+Date: Thu, 23 Jul 2026 01:57:04 +0200
+Subject: [PATCH] Make base/logging.cc compile without POSIX-only headers
+ (Windows)
+
+The googlesql-shim Windows probe (x86_64-pc-windows, MSVC/clang-cl)
+clears every build-system blocker and then stops at GoogleSQL's own
+POSIX source dependencies, the first being googlesql/base/logging.cc:
+it includes <libgen.h> and <unistd.h>, neither of which exists on
+Windows.
+
+Blocker by blocker:
+
+- <libgen.h>: included for basename(), but basename() is never actually
+  called -- the file already computes the final path component with its
+  own strrchr-based GetBasename() helper. The include is vestigial (and
+  the only <libgen.h> include in the tree), so it is simply removed.
+  POSIX basename() would have been a poor replacement anyway: its two
+  variants (GNU vs. XSI) disagree about mutating their argument, and it
+  does not exist on Windows. GetBasename() now also recognises '\\' as
+  a separator, under #ifdef _WIN32 only, since Windows paths use both.
+
+- <unistd.h>: used for access()/F_OK/W_OK in InitLogging(). Under
+  _WIN32 the include is replaced by <io.h> (_access) plus local F_OK=0
+  and W_OK=2 definitions, which MSVC's CRT does not provide; the call
+  site is guarded, calling _access() with the same modes.
+
+- mkdir(path, 0766) in EnsureDirectoryExists(): Windows _mkdir (from
+  <direct.h>) takes no mode argument; the call site is guarded.
+
+- S_ISDIR: MSVC's <sys/stat.h> provides struct stat and stat() but not
+  the S_ISDIR macro; a #ifndef fallback defines it in terms of MSVC's
+  _S_IFMT/_S_IFDIR.
+
+The README's "unistd/pthread uses behind it" beyond this file (e.g.
+common/thread_stack.cc, which uses both) are architectural and left
+for follow-ups; this change is only the logging.cc translation unit.
+
+Behavior on Linux/macOS is unchanged: every addition is under
+#ifdef _WIN32 with the original code kept verbatim under #else.
+Verified by diffing the preprocessed translation unit (clang -E -P,
+no _WIN32) before and after: the only difference is the disappearance
+of the unused <libgen.h> declarations; all other tokens are identical.
+//googlesql/base:logging builds green with the repo's hermetic clang
+toolchain, and //googlesql/base:arena_test and
+//googlesql/base:map_util_unittest (both depending on :logging) pass.
+
+The Windows path was syntax-checked, not run: the full logging.cc
+compiles clean under clang -fsyntax-only -D_WIN32 with MSVC-signature
+stubs for <direct.h>/<io.h> (glibc's other headers standing in), and
+the S_ISDIR fallback's expansion against the _S_IFMT/_S_IFDIR
+spellings was checked separately. No real MSVC/Windows-SDK compile was
+possible in this environment.
+
+Signed-off-by: Fredrik Fornwall <fredrik@fornwall.net>
+---
+ googlesql/base/logging.cc | 46 +++++++++++++++++++++++++++++++++++++--
+ 1 file changed, 44 insertions(+), 2 deletions(-)
+
+diff --git a/googlesql/base/logging.cc b/googlesql/base/logging.cc
+index 8a8c107b2..212b453d3 100644
+--- a/googlesql/base/logging.cc
++++ b/googlesql/base/logging.cc
+@@ -18,11 +18,29 @@
+ 
+ #include <errno.h>
+ #include <fcntl.h>
+-#include <libgen.h>
+ #include <string.h>
+ #include <sys/stat.h>
+ #include <sys/types.h>
+-#include <unistd.h>
++#ifdef _WIN32
++// Windows/MSVC (and clang-cl) lacks <unistd.h> and the POSIX spellings used
++// below: access()/F_OK/W_OK, mkdir()'s mode argument, and the S_ISDIR macro.
++// Provide the minimal equivalents here. The POSIX path (this #else branch plus
++// the #ifdef _WIN32 guards at the call sites further down) is left unchanged,
++// so behavior on Linux/macOS is byte-identical.
++#include <direct.h>  // _mkdir
++#include <io.h>      // _access
++#ifndef F_OK
++#define F_OK 0
++#endif
++#ifndef W_OK
++#define W_OK 2
++#endif
++#ifndef S_ISDIR
++#define S_ISDIR(mode) (((mode) & _S_IFMT) == _S_IFDIR)
++#endif
++#else
++#include <unistd.h>  // access, F_OK, W_OK
++#endif
+ #include <cstddef>
+ #include <cstdint>
+ #include <ostream>
+@@ -47,8 +65,19 @@ ABSL_CONST_INIT std::string *log_basename = nullptr;
+ // this level is logged.
+ ABSL_CONST_INIT int vlog_level = 0;
+ 
++// Returns the final path component ("basename") of `file_path`, used only to
++// strip the directory from the binary name for the log file name. This is a
++// portable replacement for POSIX basename() from <libgen.h>, which does not
++// exist on Windows and whose two POSIX variants (GNU vs. XSI) disagree about
++// mutating their argument. On Windows both '/' and '\\' separate components.
+ const char *GetBasename(const char *file_path) {
+   const char *slash = strrchr(file_path, '/');
++#ifdef _WIN32
++  const char *backslash = strrchr(file_path, '\\');
++  if (backslash != nullptr && (slash == nullptr || backslash > slash)) {
++    slash = backslash;
++  }
++#endif
+   return slash ? slash + 1 : file_path;
+ }
+ 
+@@ -73,9 +102,15 @@ bool EnsureDirectoryExists(const char *path) {
+     if (errno != ENOENT) {
+       return false;
+     }
++#ifdef _WIN32
++    if (_mkdir(path)) {  // Windows _mkdir takes no mode argument.
++      return false;
++    }
++#else
+     if (mkdir(path, 0766)) {
+       return false;
+     }
++#endif
+   } else if (!S_ISDIR(dirStat.st_mode)) {
+     return false;
+   }
+@@ -133,10 +168,17 @@ bool InitLogging(const char *directory, const char *file_name, int level) {
+     return false;
+   }
+   std::string log_path = get_log_directory() + get_log_basename();
++#ifdef _WIN32
++  if (_access(log_path.c_str(), F_OK) == 0 &&
++      _access(log_path.c_str(), W_OK) != 0) {
++    return false;
++  }
++#else
+   if (access(log_path.c_str(), F_OK) == 0 &&
+       access(log_path.c_str(), W_OK) != 0) {
+     return false;
+   }
++#endif
+   return true;
+ }
+ 

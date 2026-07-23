@@ -12,9 +12,11 @@ assets, so smallquery builds can download a prebuilt archive set instead.
 The shim sources in `shim/` originate from smallquery's
 `crates/googlesql-sys/shim` (the PR #91 / `agent/alwayslink-split` state) and
 are now versioned by this repository. GoogleSQL itself is not vendored here:
-`MODULE.bazel` pins it with an `archive_override` to an exact commit of
-[fornwall/googlesql](https://github.com/fornwall/googlesql) — the same commit
-smallquery's `vendor/googlesql` submodule points at.
+`MODULE.bazel` pins it with an `archive_override` to an exact upstream
+[google/googlesql](https://github.com/google/googlesql) commit, and applies the
+fixes smallquery needs on top as the patches in `patches/googlesql/` (the open
+pull requests against [fornwall/googlesql](https://github.com/fornwall/googlesql),
+snapshotted by `create-patches.sh`) — so there is no fork to keep rebased.
 
 ## Platform support
 
@@ -90,6 +92,25 @@ at it.
   member set, matching ICU archive sizes, and smallquery's full query test
   suite (including the timestamp/timezone tests that read ICU data at
   runtime) passes against the result.
+
+### GoogleSQL patches
+
+GoogleSQL is pinned to an upstream `google/googlesql` commit; the fixes
+smallquery needs are applied on top by the `archive_override`'s `patches`
+attribute in `MODULE.bazel`, from `patches/googlesql/`:
+
+| Patch | What it does |
+|---|---|
+| `pull-1.patch` | Splits the local service's evaluator RPCs into their own `cc_library`, so analysis-only consumers do not pull the reference implementation (`algebrizer.cc`, one of the largest compile actions). |
+| `pull-3.patch` | Makes `base/logging.cc` compile without POSIX-only headers (`<libgen.h>`/`<unistd.h>`), a Windows source-level blocker. |
+| `pull-4.patch` | Fixes `RoundUpToNextPowerOfTwo` overflow on targets where `long` is 32-bit (ILP32 and LLP64 Windows), where `1L << 62` is undefined behaviour. |
+| `pull-5.patch` | Fixes `GOOGLESQL_QCHECK_OK` silently compiling out its argument under `NDEBUG`, which made `-c opt` builds return the wrong `DATE`→`DATETIME` constant fold. |
+
+Each patch is an open pull request against
+[fornwall/googlesql](https://github.com/fornwall/googlesql). `create-patches.sh`
+fetches the current `.patch` for each PR into `patches/googlesql/`; edit the
+`PRS` list in that script (and the matching `patches = [...]` list in
+`MODULE.bazel`) to add or drop one. They apply in listed order.
 
 ### The musl legs
 

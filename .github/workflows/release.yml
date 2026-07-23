@@ -23,9 +23,11 @@ permissions:
   contents: write
 
 env:
-  # The fornwall/googlesql commit MODULE.bazel pins (asserted below, so the
-  # release notes cannot drift from the actual build input).
-  GOOGLESQL_COMMIT: 3de0fa70c44ae9a363269875ada515ab5e2ae57a
+  # The upstream google/googlesql commit MODULE.bazel pins (asserted below, so
+  # the release notes cannot drift from the actual build input). The shim's
+  # fixes are applied on top as the patches in patches/googlesql/, not carried
+  # on a fork -- see MODULE.bazel and create-patches.sh.
+  GOOGLESQL_COMMIT: 1f8aa333f4d6353cd3a64471fc83121df72df3f7
   # One LLVM major for the gnu and darwin legs: apt.llvm.org's latest
   # stable branch for noble, which Homebrew also serves as llvm@21.
   LLVM_MAJOR: "21"
@@ -75,7 +77,15 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Verify the pinned GoogleSQL commit matches MODULE.bazel
-        run: grep -q "$GOOGLESQL_COMMIT" MODULE.bazel
+        run: |
+          grep -q "$GOOGLESQL_COMMIT" MODULE.bazel
+          # Every checked-in GoogleSQL patch must be referenced by MODULE.bazel
+          # (and vice versa), so a patch added/removed with create-patches.sh
+          # cannot silently drift from what the build actually applies.
+          for p in patches/googlesql/*.patch; do
+            grep -q "//patches/googlesql:$(basename "$p")" MODULE.bazel \
+              || { echo "::error::$p is not referenced in MODULE.bazel"; exit 1; }
+          done
 
       # --force_pic is load-bearing on Linux, not an optimisation: under plain
       # `-c opt`, cc_static_library packs BOTH the PIC and non-PIC variants of
@@ -238,7 +248,7 @@ jobs:
           {
             echo "package: $name"
             echo "source: fornwall/googlesql-shim@$GITHUB_SHA"
-            echo "googlesql: fornwall/googlesql@$GOOGLESQL_COMMIT"
+            echo "googlesql: google/googlesql@$GOOGLESQL_COMMIT (+ patches/googlesql/)"
             echo "build: bazel build -c opt --force_pic //shim:static"
             cat dist/toolchain.txt
           } > dist/BUILDINFO.txt
@@ -300,7 +310,7 @@ jobs:
             echo
             echo "Built from:"
             echo "- fornwall/googlesql-shim@${GITHUB_SHA} (shim sources + build config)"
-            echo "- fornwall/googlesql@${GOOGLESQL_COMMIT} (via MODULE.bazel archive_override)"
+            echo "- google/googlesql@${GOOGLESQL_COMMIT} (via MODULE.bazel archive_override), plus the patches in patches/googlesql/"
             echo
             echo "Build: \`bazel build -c opt --force_pic //shim:static\` per platform; each tarball's \`BUILDINFO.txt\` records the exact toolchain (bazel, compiler, libc, OS image)."
             echo
