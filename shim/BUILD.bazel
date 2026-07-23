@@ -61,10 +61,10 @@ cc_library(
 
 # The behavioral gate every release leg runs in its exact build
 # configuration: analyzes a statement whose constant fold once broke under
-# `-c opt` (strict-aliasing UB in GoogleSQL; -fno-strict-aliasing in
-# .bazelrc is the standing mitigation) and asserts the folded literal is
-# the right value. A build that computes wrong answers must fail its leg,
-# not ship. See smoke_test.cc.
+# `-c opt` (a GOOGLESQL_QCHECK_OK/NDEBUG bug, fixed upstream in
+# fornwall/googlesql#5) and asserts the folded literal is the right value.
+# A build that computes wrong answers must fail its leg, not ship. See
+# smoke_test.cc.
 cc_test(
     name = "smoke_test",
     size = "small",

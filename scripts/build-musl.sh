@@ -55,7 +55,7 @@ rm -rf bazel-* dist
 
 # //shim:smoke_test alongside //shim:static so the behavioral gate runs in
 # the artifacts' exact configuration -- a build that computes wrong analyzer
-# answers (the -c opt aliasing bug) fails here rather than shipping.
+# answers (the -c opt NDEBUG/QCHECK_OK bug) fails here rather than shipping.
 # shellcheck disable=SC2086  # PY_FLAGS is deliberately word-split
 bazel test -c opt --force_pic \
   --repo_env=CC=/usr/bin/clang \

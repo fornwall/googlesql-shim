@@ -4,14 +4,16 @@
 //
 // Why this exists: a `-c opt` build of GoogleSQL once constant-folded
 // `CAST(CAST(DATETIME "2006-01-02" AS DATE) AS DATETIME)` to the zero
-// datetime for every input -- strict-aliasing UB in GoogleSQL, exploited
-// consistently by clang 18 through 22 at -O2/-Oz and invisible to every
-// build-time check (the leg was green; only a consumer running queries could
-// see it). The release pipeline runs this test in every leg's exact build
-// configuration, so a build that computes wrong answers fails its leg
-// instead of shipping. -fno-strict-aliasing in .bazelrc is the standing
-// mitigation; if it ever stops covering the bug, or a regression arrives by
-// another road, this gate is the tripwire.
+// datetime for every input -- GOOGLESQL_QCHECK_OK was defined as
+// ABSL_DCHECK_EQ, whose argument is not evaluated under NDEBUG, so the
+// entire ConstructDatetime() call at cast.cc's DATE->DATETIME case was
+// compiled out of -c opt builds, leaving the default-constructed
+// DatetimeValue (fixed upstream in fornwall/googlesql#5). Invisible to
+// every build-time check (the leg was green; only a consumer running
+// queries could see it). The release pipeline runs this test in every
+// leg's exact build configuration, so a build that computes wrong answers
+// fails its leg instead of shipping; if a regression arrives by another
+// road, this gate is the tripwire.
 
 #include <cstdint>
 #include <cstring>

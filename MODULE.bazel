@@ -14,15 +14,18 @@ module(
 )
 
 # GoogleSQL itself, pinned to the exact commit of the fornwall/googlesql fork
-# (the evaluator-split branch) that smallquery's vendor/googlesql submodule
-# points at. An override ignores the registry, so the version below only has
-# to match the MODULE.bazel inside the archive.
+# (the shim-combined branch, fornwall/googlesql#6: the evaluator split that
+# smallquery's vendor/googlesql submodule points at, plus the
+# GOOGLESQL_QCHECK_OK/NDEBUG fix from fornwall/googlesql#5 that makes -c opt
+# builds fold DATE->DATETIME casts correctly). An override ignores the
+# registry, so the version below only has to match the MODULE.bazel inside
+# the archive.
 bazel_dep(name = "googlesql", version = "2026.7.4")
 archive_override(
     module_name = "googlesql",
-    integrity = "sha256-UuwDbRBeOFPWUyE5B1TfPpKqy3Y0DTONGwTUtLZ61t4=",
-    strip_prefix = "googlesql-8d06b161dfd9fcbc69ab9765713ad817ebc31104",
-    urls = ["https://github.com/fornwall/googlesql/archive/8d06b161dfd9fcbc69ab9765713ad817ebc31104.tar.gz"],
+    integrity = "sha256-lJbHfGVCzteQOll3icZKTzc4ZbB7puKVSriDhdUGmLs=",
+    strip_prefix = "googlesql-3de0fa70c44ae9a363269875ada515ab5e2ae57a",
+    urls = ["https://github.com/fornwall/googlesql/archive/3de0fa70c44ae9a363269875ada515ab5e2ae57a.tar.gz"],
 )
 
 # Only what the shim itself references. protobuf is deliberately not declared:
