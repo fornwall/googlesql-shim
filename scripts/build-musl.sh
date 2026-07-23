@@ -34,7 +34,10 @@ set -eux
 # python3 stays: py_binary tools in the exec configuration resolve to
 # Bazel's autodetecting toolchain (env python3) when no hermetic runtime
 # matches the exec platform.
-apk add --no-cache clang bash linux-headers build-base python3
+# tzdata is for //shim:smoke_test: AnalyzerOptions' constructor CHECKs a
+# FindTimeZoneByName("America/Los_Angeles") lookup, which aborts on a
+# zoneinfo-less Alpine base image.
+apk add --no-cache clang bash linux-headers build-base python3 tzdata
 apk add --no-cache bazel8 \
   --repository=https://dl-cdn.alpinelinux.org/alpine/edge/testing
 
