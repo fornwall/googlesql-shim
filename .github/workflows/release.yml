@@ -61,7 +61,7 @@ jobs:
             os: macos-15-intel
             kind: darwin
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 120
+    timeout-minutes: 180
     steps:
       - name: Free disk space
         if: runner.os == 'Linux'
