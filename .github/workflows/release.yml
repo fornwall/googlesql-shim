@@ -98,10 +98,15 @@ jobs:
           sudo ./llvm.sh "$LLVM_MAJOR"
           "clang-$LLVM_MAJOR" --version
           bazel --version
-          bazel build -c opt --force_pic \
+          # //shim:static and //shim:smoke_test in one invocation so the gate
+          # runs in the exact configuration the artifacts are built in -- a
+          # build that computes wrong analyzer answers (the -c opt aliasing
+          # bug) fails the leg here rather than shipping.
+          bazel test -c opt --force_pic \
             --repo_env=CC="/usr/bin/clang-$LLVM_MAJOR" \
             --repo_env=CXX="/usr/bin/clang++-$LLVM_MAJOR" \
-            //shim:static
+            --test_output=errors \
+            //shim:static //shim:smoke_test
           mkdir dist
           cp -L bazel-bin/shim/libgooglesql_shim.a \
                 bazel-bin/shim/libgooglesql_shim_alwayslink.a \
@@ -156,12 +161,15 @@ jobs:
           SDKROOT="$(xcrun --show-sdk-path)"
           export SDKROOT
           bazel --version
-          bazel build -c opt --force_pic \
+          # Gate runs in the artifacts' exact configuration; see the
+          # linux-gnu step.
+          bazel test -c opt --force_pic \
             --repo_env=CC="$LLVM_PREFIX/bin/clang" \
             --repo_env=CXX="$LLVM_PREFIX/bin/clang++" \
             --repo_env=SDKROOT="$SDKROOT" \
             --action_env=SDKROOT="$SDKROOT" \
-            //shim:static
+            --test_output=errors \
+            //shim:static //shim:smoke_test
           mkdir dist
           cp -L bazel-bin/shim/libgooglesql_shim.a \
                 bazel-bin/shim/libgooglesql_shim_alwayslink.a \

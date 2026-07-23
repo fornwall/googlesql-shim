@@ -118,6 +118,13 @@ genrule(
 cc_library(
     name = "icudata_lib",
     srcs = [":icudt_c"],
+    # The data object exports one symbol that nothing references at archive
+    # scan time in a single-pass link (udata.cpp's reference sits in icuuc,
+    # which may already have been scanned), so an in-tree consumer like
+    # //shim:smoke_test needs it force-loaded. The shipped libicudata.a is
+    # unaffected: cc_static_library packs members regardless, and external
+    # consumers link the archive explicitly.
+    alwayslink = True,
     linkstatic = True,
     deps = [":icu"],
 )

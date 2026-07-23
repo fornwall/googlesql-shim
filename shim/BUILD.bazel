@@ -7,7 +7,7 @@
 # crates/googlesql-sys/shim.
 
 load("@rules_cc//cc:cc_static_library.bzl", "cc_static_library")
-load("@rules_cc//cc:defs.bzl", "cc_library")
+load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
 load(":link_extras.bzl", "cc_alwayslink_objects")
 
 cc_library(
@@ -56,6 +56,37 @@ cc_library(
         "@googlesql//googlesql/public:simple_table_cc_proto",
         "@googlesql//googlesql/public/types:type_factory",
         "@googlesql//googlesql/resolved_ast",
+    ],
+)
+
+# The behavioral gate every release leg runs in its exact build
+# configuration: analyzes a statement whose constant fold once broke under
+# `-c opt` (strict-aliasing UB in GoogleSQL; -fno-strict-aliasing in
+# .bazelrc is the standing mitigation) and asserts the folded literal is
+# the right value. A build that computes wrong answers must fail its leg,
+# not ship. See smoke_test.cc.
+cc_test(
+    name = "smoke_test",
+    size = "small",
+    srcs = ["smoke_test.cc"],
+    # Fully static, like the shipped archives -- and necessary: the default
+    # dev-mode dynamic link puts the (linkstatic) ICU data archive ahead of
+    # the shared libraries whose undefined icudt76_dat would pull its
+    # member, so the symbol never resolves.
+    linkstatic = True,
+    deps = [
+        ":shim_lib",
+        "@com_google_absl//absl/strings",
+        "@googlesql//googlesql/local_service:local_service_cc_proto",
+        "@googlesql//googlesql/public:civil_time",
+        "@googlesql//googlesql/public:options_cc_proto",
+        # GoogleSQL compiles against headers-only @icu targets (so the
+        # release bundle stays ICU-free); an actual *binary* like this test
+        # must therefore link the ICU code and data libraries explicitly.
+        "@icu//:icudata_lib",
+        "@icu//:icui18n_lib",
+        "@icu//:icuio_lib",
+        "@icu//:icuuc_lib",
     ],
 )
 

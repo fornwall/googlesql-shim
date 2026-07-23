@@ -53,12 +53,16 @@ cp -r /src /work
 cd /work
 rm -rf bazel-* dist
 
+# //shim:smoke_test alongside //shim:static so the behavioral gate runs in
+# the artifacts' exact configuration -- a build that computes wrong analyzer
+# answers (the -c opt aliasing bug) fails here rather than shipping.
 # shellcheck disable=SC2086  # PY_FLAGS is deliberately word-split
-bazel build -c opt --force_pic \
+bazel test -c opt --force_pic \
   --repo_env=CC=/usr/bin/clang \
   --repo_env=CXX=/usr/bin/clang++ \
+  --test_output=errors \
   $PY_FLAGS \
-  //shim:static
+  //shim:static //shim:smoke_test
 
 cp -L bazel-bin/shim/libgooglesql_shim.a \
       bazel-bin/shim/libgooglesql_shim_alwayslink.a \
