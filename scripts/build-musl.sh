@@ -72,6 +72,9 @@ cp -L bazel-bin/shim/libgooglesql_shim.a \
       bazel-bin/shim/libicu*.a \
       /out/
 cp -rL bazel-bin/shim/protos /out/protos
+# Bazel outputs are read-only; ship writable trees so a consumer's extracted
+# cache can be removed with a plain rm -rf.
+chmod -R u+w /out
 
 {
   echo "triple: ${arch}-linux-musl"
