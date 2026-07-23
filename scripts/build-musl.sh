@@ -65,12 +65,13 @@ bazel test -c opt --force_pic \
   --repo_env=CXX=/usr/bin/clang++ \
   --test_output=errors \
   $PY_FLAGS \
-  //shim:static //shim:smoke_test
+  //shim:static //shim:smoke_test //shim:protos
 
 cp -L bazel-bin/shim/libgooglesql_shim.a \
       bazel-bin/shim/libgooglesql_shim_alwayslink.a \
       bazel-bin/shim/libicu*.a \
       /out/
+cp -rL bazel-bin/shim/protos /out/protos
 
 {
   echo "triple: ${arch}-linux-musl"

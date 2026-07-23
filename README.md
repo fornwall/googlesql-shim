@@ -40,7 +40,13 @@ them: `googlesql-shim-<tag>-<triple>.tar.zst`, zstd-compressed
 | `libgooglesql_shim.a` | The shim and its whole transitive GoogleSQL closure (Abseil, protobuf, RE2, ...) flattened into one archive by `cc_static_library`. Contains no ICU objects. |
 | `libgooglesql_shim_alwayslink.a` | The objects of every `alwayslink = 1` target in the closure (today exactly `row_type_with_catalog.pic.o`). A `.a` cannot record `alwayslink`, and these objects export no strong global symbol, so ordinary archive member selection would silently drop them — the consumer must link this side archive with `--whole-archive` (`+whole-archive` in rustc terms), *before* the main archive. |
 | `libicudata.a`, `libicuuc.a`, `libicui18n.a`, `libicuio.a` | ICU, built natively from the same icu4c release GoogleSQL pins (see below). Linked normally, after the main archive. |
+| `protos/` | The transitive `.proto` closure of `googlesql/local_service/local_service.proto`, laid out by import path (`shim/proto_closure.bzl`) — including `parse_tree.proto`, `resolved_ast.proto` and `resolved_node_kind.proto`, which upstream generates from `.template` files during the Bazel build and which therefore exist in no source tree. `protoc -I protos` compiles the entry point with no other include path. |
 | `BUILDINFO.txt` | Provenance: the googlesql-shim and googlesql commits, build flags, and the exact bazel/compiler/libc/OS versions used. |
+
+A release also carries one platform-independent
+`googlesql-shim-<tag>-protos.tar.zst` holding `protos/` and `BUILDINFO.txt`
+alone, for consumers that need the generated proto types but not the
+archives (smallquery's `GOOGLESQL_SYS_SKIP_NATIVE` builds).
 
 To verify a download:
 
@@ -50,14 +56,14 @@ sha256sum -c --ignore-missing SHA256SUMS
 
 ## How this maps to smallquery's build
 
-These are the same artifact set that
-`bazel build //crates/googlesql-sys/shim:static` produces inside smallquery
-at `bazel-bin/crates/googlesql-sys/shim/`. smallquery's
-`crates/googlesql-sys/build.rs` (static feature) expects exactly this set in
-one directory: it links `googlesql_shim_alwayslink` with `+whole-archive`,
-then `googlesql_shim`, then every other `lib*.a` beside them (ICU), then the
-system `stdc++`/`pthread`/`m`/`dl`. Extract a tarball into a directory and
-point `GOOGLESQL_SHIM_LIB` at the `libgooglesql_shim.a` there.
+smallquery's `crates/googlesql-sys/build.rs` downloads the release tarball
+for the detected host, verifies its pinned sha256, and expects exactly this
+set in one directory: it generates Rust proto types from `protos/`, links
+`googlesql_shim_alwayslink` with `+whole-archive`, then `googlesql_shim`,
+then every other `lib*.a` beside them (ICU), then the system C++/pthread/m/dl
+libraries. To use a locally built set instead, extract a tarball (or stage
+`bazel-bin/shim/` output) into a directory and point `GOOGLESQL_SHIM_DIR`
+at it.
 
 ## Build configuration
 

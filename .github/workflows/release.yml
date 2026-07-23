@@ -106,11 +106,12 @@ jobs:
             --repo_env=CC="/usr/bin/clang-$LLVM_MAJOR" \
             --repo_env=CXX="/usr/bin/clang++-$LLVM_MAJOR" \
             --test_output=errors \
-            //shim:static //shim:smoke_test
+            //shim:static //shim:smoke_test //shim:protos
           mkdir dist
           cp -L bazel-bin/shim/libgooglesql_shim.a \
                 bazel-bin/shim/libgooglesql_shim_alwayslink.a \
                 bazel-bin/shim/libicu*.a dist/
+          cp -rL bazel-bin/shim/protos dist/protos
           {
             echo "triple: ${{ matrix.triple }}"
             echo "bazel: $(bazel --version)"
@@ -169,11 +170,12 @@ jobs:
             --repo_env=SDKROOT="$SDKROOT" \
             --action_env=SDKROOT="$SDKROOT" \
             --test_output=errors \
-            //shim:static //shim:smoke_test
+            //shim:static //shim:smoke_test //shim:protos
           mkdir dist
           cp -L bazel-bin/shim/libgooglesql_shim.a \
                 bazel-bin/shim/libgooglesql_shim_alwayslink.a \
                 bazel-bin/shim/libicu*.a dist/
+          cp -rL bazel-bin/shim/protos dist/protos
           {
             echo "triple: ${{ matrix.triple }}"
             echo "bazel: $(bazel --version)"
@@ -188,6 +190,13 @@ jobs:
           test -f libgooglesql_shim.a
           test -f libgooglesql_shim_alwayslink.a
           ls libicu*.a
+          # The proto closure smallquery's build.rs feeds prost: the entry
+          # point plus the three protos upstream generates from .template
+          # files (which exist in no source tree, hence shipping them here).
+          test -f protos/googlesql/local_service/local_service.proto
+          test -f protos/googlesql/parser/parse_tree.proto
+          test -f protos/googlesql/resolved_ast/resolved_ast.proto
+          test -f protos/googlesql/resolved_ast/resolved_node_kind.proto
           # The alwayslink hazard guard: the side archive must carry the
           # ROW-type static-initializer object that smallquery force-loads
           # with +whole-archive (`row_type_with_catalog.pic.o` on Linux,
@@ -234,6 +243,20 @@ jobs:
           # independent); the ~19 s/artifact encode cost is paid once here.
           tar -cf - -C dist . | zstd -19 -T0 -o "$name.tar.zst"
           ls -la "$name.tar.zst"
+          # One leg also publishes the protos alone (same `protos/` layout as
+          # the platform tarballs, plus BUILDINFO.txt), for consumers that
+          # need the generated types but not the archives -- smallquery's
+          # GOOGLESQL_SYS_SKIP_NATIVE builds. The closure is
+          # platform-independent, so any single leg serves; this one is the
+          # cheapest runner.
+          if [ "${{ matrix.triple }}" = x86_64-linux-gnu ]; then
+            mkdir proto-dist
+            cp -r dist/protos proto-dist/protos
+            cp dist/BUILDINFO.txt proto-dist/
+            tar -cf - -C proto-dist . | zstd -19 -T0 \
+              -o "googlesql-shim-$version-protos.tar.zst"
+            ls -la "googlesql-shim-$version-protos.tar.zst"
+          fi
 
       - uses: actions/upload-artifact@v7
         with:
@@ -275,7 +298,7 @@ jobs:
             echo
             echo "Build: \`bazel build -c opt --force_pic //shim:static\` per platform; each tarball's \`BUILDINFO.txt\` records the exact toolchain (bazel, compiler, libc, OS image)."
             echo
-            echo "One \`.tar.zst\` per platform (extract with \`tar --zstd -xf\`), containing at its root: \`libgooglesql_shim.a\`, \`libgooglesql_shim_alwayslink.a\`, the ICU archives (\`libicudata.a\`, \`libicuuc.a\`, \`libicui18n.a\`, \`libicuio.a\`) and \`BUILDINFO.txt\`. \`SHA256SUMS\` covers all tarballs (\`sha256sum -c\`). See the README for the platform table, how the archives map onto smallquery's static link, and the libc compatibility caveats."
+            echo "One \`.tar.zst\` per platform (extract with \`tar --zstd -xf\`), containing at its root: \`libgooglesql_shim.a\`, \`libgooglesql_shim_alwayslink.a\`, the ICU archives (\`libicudata.a\`, \`libicuuc.a\`, \`libicui18n.a\`, \`libicuio.a\`), \`protos/\` (the transitive \`.proto\` closure of \`local_service.proto\`, including the three protos upstream generates from \`.template\` files) and \`BUILDINFO.txt\`. The \`-protos\` tarball carries \`protos/\` alone, for consumers that need the generated types but not the archives. \`SHA256SUMS\` covers all tarballs (\`sha256sum -c\`). See the README for the platform table, how the archives map onto smallquery's static link, and the libc compatibility caveats."
           } > notes.md
           gh release create "$GITHUB_REF_NAME" \
             --repo "$GITHUB_REPOSITORY" \

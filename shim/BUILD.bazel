@@ -9,6 +9,7 @@
 load("@rules_cc//cc:cc_static_library.bzl", "cc_static_library")
 load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
 load(":link_extras.bzl", "cc_alwayslink_objects")
+load(":proto_closure.bzl", "proto_closure")
 
 cc_library(
     name = "shim_lib",
@@ -144,6 +145,17 @@ cc_alwayslink_objects(
         "icudata",
     ]
 ]
+
+# The transitive .proto closure of local_service.proto, laid out by import
+# path -- what smallquery's build.rs feeds prost. Shipped as `protos/` in
+# every release tarball (and as a standalone protos tarball, for consumers
+# that need the types but not the archives); see proto_closure.bzl for why
+# this cannot be a source checkout (three of the protos are generated).
+proto_closure(
+    name = "protos",
+    proto = "@googlesql//googlesql/local_service:local_service_proto",
+    visibility = ["//visibility:public"],
+)
 
 # What a release is built from:
 #   bazel build -c opt --force_pic //shim:static

@@ -28,10 +28,13 @@ archive_override(
     urls = ["https://github.com/fornwall/googlesql/archive/3de0fa70c44ae9a363269875ada515ab5e2ae57a.tar.gz"],
 )
 
-# Only what the shim itself references. protobuf is deliberately not declared:
-# it arrives transitively via local_service_cc_proto, and pinning it here just
-# creates version conflicts with whatever GoogleSQL resolves to.
+# Only what the shim itself references.
 bazel_dep(name = "abseil-cpp", version = "20260107.0", repo_name = "com_google_absl")
+
+# Same version GoogleSQL pins, declared directly so shim/proto_closure.bzl can
+# load ProtoInfo from it (Bzlmod resolves to the higher of the two if they
+# ever diverge, which is fine -- the rule only reads ProtoInfo's stable API).
+bazel_dep(name = "protobuf", version = "33.4", repo_name = "com_google_protobuf")
 
 # The @icu repo's BUILD file select()s on @platforms//os:windows, and a repo
 # created by the root module only sees the root's direct deps.
