@@ -1,0 +1,10 @@
+version: 2
+updates:
+  # Only the workflow actions: Bazel modules (MODULE.bazel) are not a
+  # dependabot ecosystem, and the GoogleSQL pin is deliberate (an
+  # archive_override on an exact commit, bumped by hand together with a
+  # release).
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
