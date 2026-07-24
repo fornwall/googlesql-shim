@@ -14,13 +14,20 @@
 #     --output_base=C:/_b.
 # - x86_64, current wall -- GoogleSQL SOURCE, not the build system: with
 #   everything above cleared the build gets through all of Abseil/protobuf
-#   and ~1800/2700 targets into GoogleSQL, then hits
-#   googlesql/base/logging.cc's `#include <libgen.h>` (POSIX basename(),
-#   absent on Windows and supplied by no compiler flag). thread_stack.cc
-#   and others carry further unistd/pthread dependencies behind it. These
-#   are upstream GoogleSQL portability gaps -- fixing them means patching
-#   fornwall/googlesql, out of scope for a build-config repo -- so this is
-#   the documented stopping point for x86_64 Windows.
+#   and ~1800/2700 targets into GoogleSQL, then hits GoogleSQL's own POSIX
+#   source dependencies. These are patched (OS-guarded) on fornwall/googlesql
+#   and applied via MODULE.bazel: base/logging.cc (<libgen.h>/<unistd.h>,
+#   pull-3) and common/thread_stack.cc (pthread/unistd, pull-7) clear the
+#   pthread/unistd tail. The next known blocker is the networking code
+#   (googlesql/base/net/ipaddress_oss.* and googlesql/public/functions/net.cc),
+#   which needs a winsock port -- <arpa/inet.h>/<netinet/in.h> and, hardest,
+#   the in6_addr.s6_addr32/s6_addr16 member accesses that Windows' in6_addr
+#   does not provide. Tracked as follow-up upstream PRs.
+# - This workflow now relies on the checked-in .bazelrc (build:windows section)
+#   rather than --ignore_all_rc_files: the Clang/GNU flags moved to build:unix
+#   so MSVC no longer sees them, and build:windows carries the /std:c++20,
+#   /utf-8, /bigobj, /Zc:* and /D* equivalents. Only --output_base (a startup
+#   flag, which no bazelrc config can carry) stays on the command line.
 # - aarch64: fails even earlier and for an unrelated reason -- GoogleSQL's
 #   pip module extension (rules_python) has no hermetic interpreter for
 #   windows-arm64, so analysis aborts before any C++; past that it shares
@@ -73,10 +80,10 @@ jobs:
           Add-Content $env:GITHUB_PATH "C:\msys64\usr\bin"
 
       # pwsh rather than bash: git-bash's MSYS path conversion mangles
-      # //-prefixed labels. The checked-in .bazelrc carries clang/GNU flags
-      # that MSVC would reject before the real portability problems even
-      # surface, so the probe bypasses rc files and passes the minimal
-      # equivalents.
+      # //-prefixed labels. The checked-in .bazelrc now has a build:windows
+      # section (MSVC flags) and keeps the Clang/GNU flags under build:unix, so
+      # the probe reads the rc files normally -- no --ignore_all_rc_files, no
+      # inline flag duplication.
       - name: Probe the build
         shell: pwsh
         run: |
@@ -84,13 +91,14 @@ jobs:
           # --output_base=C:/_b: GoogleSQL's dependency paths overflow
           # MAX_PATH from the default output root (cl.exe D8022 on a
           # .obj.params file); a two-character base saves ~50 characters.
-          bazel --ignore_all_rc_files --output_base=C:/_b build -c opt --check_visibility=false '--incompatible_autoload_externally=+ProtoInfo,+CcInfo,+JavaInfo,+JavaPluginInfo,+proto_library,+cc_library,+cc_binary,+cc_test,+cc_import,+cc_proto_library,+cc_shared_library,+java_library,+java_binary,+java_test,+java_import,+java_plugin,+java_proto_library,+java_lite_proto_library' --cxxopt=/std:c++20 '${{ inputs.target }}'
+          # This is a startup flag, so it cannot live in a bazelrc config.
+          bazel --output_base=C:/_b build -c opt '${{ inputs.target }}'
 
       - name: Dump foreign_cc state on failure
         if: failure()
         shell: pwsh
         run: |
-          $out = bazel --ignore_all_rc_files --output_base=C:/_b info output_path
+          $out = bazel --output_base=C:/_b info output_path
           $icu = "$out\x64_windows-opt\bin\external\googlesql++googlesql_http_archive_deps+icu"
           if (-not (Test-Path $icu)) { $icu = "$out\arm64_windows-opt\bin\external\googlesql++googlesql_http_archive_deps+icu" }
           Write-Host "== foreign_cc tree (first 80 entries):"
@@ -105,6 +113,6 @@ jobs:
           Write-Host "== assembled source tree (LinkType reveals symlink flavor):"
           Get-ChildItem -ErrorAction SilentlyContinue "$icu.build_tmpdir\icu" | Select-Object Name, LinkType | Format-Table
           Get-ChildItem -ErrorAction SilentlyContinue "$icu.build_tmpdir\icu\source" | Select-Object -First 30 Name, LinkType | Format-Table
-          $ext = bazel --ignore_all_rc_files --output_base=C:/_b info output_base
+          $ext = bazel --output_base=C:/_b info output_base
           Write-Host "== fetched ICU source dir (aux files present?):"
           Get-ChildItem -ErrorAction SilentlyContinue "$ext\external\googlesql++googlesql_http_archive_deps+icu\source" | Select-Object -First 40 -ExpandProperty Name
