@@ -8,3 +8,14 @@ py_binary(
     srcs = ["dat_to_c.py"],
     visibility = ["//visibility:public"],
 )
+
+# Removes items GoogleSQL has no runtime path to (charset converters, locale
+# display-name trees, ...) from the ICU data before it is embedded, ~16 MB
+# off the shipped data. See filter_dat.py and icu_data_remove.txt.
+py_binary(
+    name = "filter_dat",
+    srcs = ["filter_dat.py"],
+    visibility = ["//visibility:public"],
+)
+
+exports_files(["icu_data_remove.txt"])

@@ -103,21 +103,40 @@ cc_library(
     deps = [":internal_headers"],
 )
 
+# Trim the prebuilt ICU data before embedding: drop the items GoogleSQL has
+# no runtime path to (see @//third_party/icu:icu_data_remove.txt), ~16 MB off
+# the ~30 MB blob. filter_dat.py is a pure-Python icupkg -r (verified
+# byte-for-byte against the real tool), so no ICU tool has to be built first.
+genrule(
+    name = "icudt_filtered",
+    srcs = [
+        "source/data/in/icudt76l.dat",
+        "@//third_party/icu:icu_data_remove.txt",
+    ],
+    outs = ["icudt76l_filtered.dat"],
+    cmd = "$(location @//third_party/icu:filter_dat) " +
+          "$(location source/data/in/icudt76l.dat) " +
+          "$(location @//third_party/icu:icu_data_remove.txt) $@",
+    tools = ["@//third_party/icu:filter_dat"],
+)
+
 # The ICU data, embedded the way `genccode` embeds it for static data
-# packaging: the release's prebuilt little-endian icudt76l.dat rendered as
-# a C array defining the icudt76_dat entry-point symbol that udata.cpp
-# expects to find linked in.
+# packaging: the (filtered) little-endian icudt76l.dat rendered as a C array
+# defining the icudt76_dat entry-point symbol that udata.cpp expects to find
+# linked in.
 genrule(
     name = "icudt_c",
-    srcs = ["source/data/in/icudt76l.dat"],
+    srcs = [":icudt_filtered"],
     outs = ["icudt76_dat.c"],
-    cmd = "$(location @//third_party/icu:dat_to_c) $(location source/data/in/icudt76l.dat) icudt76 $@",
+    cmd = "$(location @//third_party/icu:dat_to_c) $(location :icudt_filtered) icudt76 $@",
     tools = ["@//third_party/icu:dat_to_c"],
 )
 
 cc_library(
     name = "icudata_lib",
     srcs = [":icudt_c"],
+    linkstatic = True,
+    deps = [":icu"],
     # The data object exports one symbol that nothing references at archive
     # scan time in a single-pass link (udata.cpp's reference sits in icuuc,
     # which may already have been scanned), so an in-tree consumer like
@@ -125,8 +144,6 @@ cc_library(
     # unaffected: cc_static_library packs members regardless, and external
     # consumers link the archive explicitly.
     alwayslink = True,
-    linkstatic = True,
-    deps = [":icu"],
 )
 
 # One flattened archive per component, named so the staging genrules in the

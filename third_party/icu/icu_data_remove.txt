@@ -1,0 +1,30 @@
+# Items removed from icudt76l.dat before it is embedded, one Python regex per
+# line (matched with re.search against the full item name, e.g.
+# "icudt76l/curr/en.res"). See filter_dat.py.
+#
+# The rule for adding a line: GoogleSQL must have no runtime path that reads
+# the data, and the compliance + string/collation/normalize/timestamp suites
+# must still pass against a shim built with it removed. Everything kept below
+# the cut -- collation tailorings (coll/), normalization (*.nrm), character
+# properties, the base collation (ucadata), break iteration (brkitr/) and the
+# timezone *rules* (zoneinfo64/metaZones/... which live at the root, not under
+# zone/) -- is data those functions actually touch, so it stays.
+
+# Legacy charset converters. BigQuery/GoogleSQL exposes no CONVERT-with-
+# encoding surface; UTF-8/UTF-16 handling is in the icuuc code, not this data.
+# (The cnvalias.icu alias table is left in place -- tiny, and the converter
+# subsystem may touch it at init.)
+/[^/]*\.cnv$
+
+# Per-locale display-name trees: currency names, language names, region
+# names, measurement-unit names. Used by locale-aware *formatting* of those
+# entities, which BigQuery has no function for.
+^icudt76l/curr/
+^icudt76l/lang/
+^icudt76l/region/
+^icudt76l/unit/
+
+# Rule-based number formatting (spelling numbers as words) and script
+# transliteration: no BigQuery surface.
+^icudt76l/rbnf/
+^icudt76l/translit/
