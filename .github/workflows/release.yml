@@ -44,9 +44,18 @@ jobs:
           - triple: aarch64-linux-gnu
             os: ubuntu-24.04-arm
             kind: linux-gnu
+          # Cross-compiled from the glibc x86_64 runner with the
+          # hermetic_cc_toolchain (zig cc) via --config=musl: the exec
+          # configuration stays glibc (protoc and GoogleSQL's Python code
+          # generators run on the host), only the target objects compile for
+          # musl. No Alpine container, no musl-native Bazel, no musl CPython.
           - triple: x86_64-linux-musl
             os: ubuntu-24.04
-            kind: linux-musl
+            kind: linux-musl-cross
+          # Still native inside an Alpine container on the arm runner: no
+          # rules_python release ships an aarch64-musl CPython, so the cross
+          # toolchain's exec-stays-glibc trick is not what unblocks this leg
+          # (see scripts/build-musl.sh).
           - triple: aarch64-linux-musl
             os: ubuntu-24.04-arm
             kind: linux-musl
@@ -134,24 +143,65 @@ jobs:
           } > dist/toolchain.txt
           df -h /
 
-      # musl cannot run upstream Bazel (glibc-only binaries); the build runs
-      # natively inside an Alpine container instead -- see the script for the
-      # full story (Alpine's musl-native bazel8 package, plus gcompat for the
-      # one glibc-linked piece: rules_python's hermetic CPython, which only
-      # runs GoogleSQL's code generators and contributes nothing to the
-      # archives). The container follows the runner's architecture, so the
-      # same script serves x86_64 and aarch64.
-      # x86_64 builds on stable Alpine; aarch64 needs a digest-pinned edge
-      # image because no rules_python version ships an aarch64-musl CPython,
-      # so the glibc interpreter must run under gcompat + edge's musl (see
-      # scripts/build-musl.sh for the full story).
+      # x86_64 musl is a cross-compile from this glibc runner: the same recipe
+      # as linux-gnu, plus --config=musl. That flag points the TARGET platform
+      # at hermetic_cc_toolchain's libc-aware musl platform (zig cc, fetched by
+      # Bazel -- no local install), while the EXEC configuration stays glibc, so
+      # protoc and GoogleSQL's Python code generators run on the host clang
+      # toolchain exactly as they do for linux-gnu. Only the shipped target
+      # objects compile for musl. The whole native-Alpine machinery
+      # (musl-native Bazel, musl CPython, the rules_python host-preference
+      # flags, gcompat) is unnecessary here: it only existed because the old
+      # build ran natively *on* musl. zig links the smoke_test fully static, so
+      # the behavioral gate -- same arch as the runner -- runs directly here.
+      - name: Build (linux-musl cross, zig cc)
+        if: matrix.kind == 'linux-musl-cross'
+        run: |
+          wget -q https://apt.llvm.org/llvm.sh
+          chmod +x llvm.sh
+          sudo ./llvm.sh "$LLVM_MAJOR"
+          "clang-$LLVM_MAJOR" --version
+          bazel --version
+          # //shim:static and //shim:smoke_test in one invocation so the gate
+          # runs in the exact (musl) configuration the artifacts are built in.
+          # --config=musl selects the zig/musl target toolchain; CC/CXX drive
+          # the host autodetect toolchain used for the exec configuration.
+          bazel test -c opt --force_pic --config=musl \
+            --repo_env=CC="/usr/bin/clang-$LLVM_MAJOR" \
+            --repo_env=CXX="/usr/bin/clang++-$LLVM_MAJOR" \
+            --test_output=errors \
+            //shim:static //shim:smoke_test //shim:protos
+          # The archive really contains musl x86_64 objects, and the test
+          # binary is fully static (runs on this glibc host, no NEEDED libs).
+          file bazel-bin/shim/smoke_test
+          test "$(readelf -d bazel-bin/shim/smoke_test | grep -c NEEDED)" -eq 0
+          mkdir dist
+          cp -L bazel-bin/shim/libgooglesql_shim.a \
+                bazel-bin/shim/libgooglesql_shim_alwayslink.a \
+                bazel-bin/shim/libicu*.a dist/
+          cp -rL bazel-bin/shim/protos dist/protos
+          # Bazel outputs are read-only; ship writable trees so a consumer's
+          # extracted cache can be removed with a plain rm -rf.
+          chmod -R u+w dist
+          {
+            echo "triple: ${{ matrix.triple }}"
+            echo "bazel: $(bazel --version)"
+            echo "cc (target): hermetic_cc_toolchain / zig cc (musl), fetched by Bazel"
+            echo "cc (exec): $("clang-$LLVM_MAJOR" --version | head -1)"
+            echo "libc: musl (zig-bundled sysroot), fully static archives"
+            echo "os: $(lsb_release -ds) (GitHub ${{ matrix.os }} runner, cross-compile)"
+          } > dist/toolchain.txt
+          df -h /
+
+      # aarch64 musl is still native inside an Alpine container: no
+      # rules_python release ships an aarch64-musl CPython, so the glibc
+      # interpreter must run under gcompat + edge's musl (see
+      # scripts/build-musl.sh for the full story). The x86_64 leg above no
+      # longer uses this path.
       - name: Build (linux-musl, in an Alpine container)
         if: matrix.kind == 'linux-musl'
         run: |
-          case "${{ matrix.triple }}" in
-            aarch64-*) img="alpine:edge@sha256:9a341ff2287c54b86425cbee0141114d811ae69d88a36019087be6d896cef241" ;;
-            *)         img="alpine:3.23" ;;
-          esac
+          img="alpine:edge@sha256:9a341ff2287c54b86425cbee0141114d811ae69d88a36019087be6d896cef241"
           mkdir dist
           docker run --rm -v "$PWD":/src:ro -v "$PWD/dist":/out "$img" \
             sh /src/scripts/build-musl.sh
