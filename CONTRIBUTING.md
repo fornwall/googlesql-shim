@@ -7,21 +7,26 @@ Changes to the shim's *behaviour* usually belong in smallquery (whose
 itself go upstream as pull requests against
 [fornwall/googlesql](https://github.com/fornwall/googlesql) and are applied to
 the pinned `google/googlesql` commit as the patches in `patches/googlesql/`.
-Edit the `PRS` array in `create-patches.sh` and re-run it: it refreshes the
+Edit the `PRS` array in `create-patches.py` and re-run it: it refreshes the
 patch files and regenerates the `patches = [...]` list in `MODULE.bazel`.
 Changes to how the archives are built, packaged and released belong here.
 
 ## Checks
 
 CI runs actionlint, buildifier, a pinned clang-format
-(`pip install clang-format==19.1.7`, config in `.clang-format`) and
-shellcheck on every push to main and every pull request. To run them locally:
+(`pip install clang-format==19.1.7`, config in `.clang-format`), shellcheck,
+and — on the Python sources — ruff (lint + format) and pyrefly (type check),
+on every push to main and every pull request. ruff and pyrefly are unpinned
+(CI uses the latest of each), so there is no config to keep in sync. To run
+them locally:
 
 ```sh
 actionlint
 buildifier -mode=check -lint=warn -r .
 clang-format --dry-run --Werror shim/shim.cc shim/shim.h
 git ls-files '*.sh' | xargs shellcheck
+uvx ruff check && uvx ruff format --check
+git ls-files '*.py' | xargs uvx pyrefly check
 ```
 
 ## Developer Certificate of Origin

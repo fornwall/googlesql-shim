@@ -4,7 +4,13 @@
 # - clang-format (pinned via pip, so local runs can match exactly) on the
 #   C++ shim sources,
 # - buildifier on the Bazel files (MODULE.bazel, BUILD.bazel, *.bzl),
-# - shellcheck on the shell scripts.
+# - shellcheck on the shell scripts,
+# - ruff (lint + format) and pyrefly (type check) on the Python sources.
+#
+# ruff and pyrefly run via their official actions (astral-sh/ruff-action,
+# facebook/pyrefly) with no tool-version pin, so CI tracks the latest of each
+# and dependabot keeps the action tags current. clang-format and buildifier
+# stay version-pinned.
 
 name: ci
 
@@ -56,3 +62,26 @@ jobs:
         run: |
           shellcheck --version
           git ls-files '*.sh' | xargs -r shellcheck
+
+  ruff:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      # No `version` input: the action installs the latest ruff, so CI tracks
+      # ruff's evolving default ruleset instead of us maintaining a select.
+      # Dependabot's github-actions ecosystem keeps the action tag current.
+      - name: Lint the Python sources
+        uses: astral-sh/ruff-action@v3
+      - name: Format-check the Python sources
+        uses: astral-sh/ruff-action@v3
+        with:
+          args: "format --check"
+
+  pyrefly:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      # Official Meta composite action: installs the latest pyrefly and runs
+      # `pyrefly check` over the tree (no version pin, same as ruff above).
+      # Dependabot's github-actions ecosystem keeps the action tag current.
+      - uses: facebook/pyrefly@1.1.1
