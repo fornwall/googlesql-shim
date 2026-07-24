@@ -7,10 +7,10 @@
 # - shellcheck on the shell scripts,
 # - ruff (lint + format) and pyrefly (type check) on the Python sources.
 #
-# ruff and pyrefly run via their official actions (astral-sh/ruff-action,
-# facebook/pyrefly) with no tool-version pin, so CI tracks the latest of each
-# and dependabot keeps the action tags current. clang-format and buildifier
-# stay version-pinned.
+# ruff runs via the official astral-sh/ruff-action (dependabot keeps the action
+# current); pyrefly via Meta's documented `pip install pyrefly` (its composite
+# action does not stage on GitHub). Neither tool version is pinned, so CI tracks
+# the latest of each. clang-format and buildifier stay version-pinned.
 
 name: ci
 
@@ -81,7 +81,14 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
-      # Official Meta composite action: installs the latest pyrefly and runs
-      # `pyrefly check` over the tree (no version pin, same as ruff above).
-      # Dependabot's github-actions ecosystem keeps the action tag current.
-      - uses: facebook/pyrefly@1.1.1
+      # Meta's documented manual CI method (`pip install pyrefly` + check with
+      # GitHub-annotation output). Their composite action facebook/pyrefly is
+      # not usable: @1.1.1 fails to stage (a dangling pyrefly_wasm/rust-toolchain
+      # symlink), and @main stages but passes `--output-format full-text-with-
+      # github`, a value the latest pyrefly it installs no longer accepts.
+      # Unpinned, like ruff, so CI tracks latest pyrefly.
+      - name: Type-check the Python sources
+        run: |
+          pip install pyrefly
+          pyrefly --version
+          git ls-files '*.py' | xargs pyrefly check --output-format=github
