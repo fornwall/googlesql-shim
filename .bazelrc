@@ -15,29 +15,41 @@
 
 # Language
 # --------
-build --cxxopt=-std=c++20 --host_cxxopt=-std=c++20
+# These are Clang/GNU flag spellings, so they must NOT sit on the unconditional
+# `build` line: MSVC would reject `-std=c++20` and the `-Wno-*` names before the
+# real portability problems even surface. They live in `build:unix`, which
+# `--enable_platform_specific_config` pulls in on Linux and macOS (see the
+# Platform section); `build:windows` carries the MSVC equivalents. Keeping them
+# off `build` is what lets the Windows build run without --ignore_all_rc_files.
+build:unix --cxxopt=-std=c++20 --host_cxxopt=-std=c++20
 
 # A Clang defaulting to C23 rejects C sources that use `bool` as an identifier;
 # `-std=gnu17` pins every C compilation to the older dialect (protobuf, zlib,
-# and the other vendored C code).
-build --conlyopt=-std=gnu17 --host_conlyopt=-std=gnu17
+# and the other vendored C code). MSVC's C front end has no such default, so
+# there is no build:windows counterpart.
+build:unix --conlyopt=-std=gnu17 --host_conlyopt=-std=gnu17
 
 # Warnings, mirroring the `build:clang` config in GoogleSQL's own .bazelrc.
-build --cxxopt=-Wno-deprecated-declarations
-build --cxxopt=-Wno-inconsistent-missing-override
-build --cxxopt=-Wno-range-loop-analysis
-build --cxxopt=-Wno-char-subscripts
-build --cxxopt=-Wno-enum-compare-switch
-build --cxxopt=-Wno-defaulted-function-deleted
-build --cxxopt=-Wno-unused-private-field
-build --cxxopt=-Wno-unused-const-variable
-build --cxxopt=-Wno-unused-function
-build --cxxopt=-Wno-macro-redefined
-build --cxxopt=-Wno-unused-command-line-argument
-build --cxxopt=-Wno-module-import-in-extern-c
+build:unix --cxxopt=-Wno-deprecated-declarations
+build:unix --cxxopt=-Wno-inconsistent-missing-override
+build:unix --cxxopt=-Wno-range-loop-analysis
+build:unix --cxxopt=-Wno-char-subscripts
+build:unix --cxxopt=-Wno-enum-compare-switch
+build:unix --cxxopt=-Wno-defaulted-function-deleted
+build:unix --cxxopt=-Wno-unused-private-field
+build:unix --cxxopt=-Wno-unused-const-variable
+build:unix --cxxopt=-Wno-unused-function
+build:unix --cxxopt=-Wno-macro-redefined
+build:unix --cxxopt=-Wno-unused-command-line-argument
+build:unix --cxxopt=-Wno-module-import-in-extern-c
 
-# Platform-specific sections below (build:linux / build:macos).
+# Platform-specific sections. --enable_platform_specific_config auto-applies
+# build:linux / build:macos / build:windows by host OS. Linux and macOS share
+# the Clang/GNU flags above via build:unix; Windows uses MSVC (see the Windows
+# section below).
 common --enable_platform_specific_config
+build:linux --config=unix
+build:macos --config=unix
 
 # Linking (Linux only -- ld64 on macOS has neither flag spelling, and the
 # problem is GNU-ld-specific)
@@ -49,6 +61,39 @@ common --enable_platform_specific_config
 # both glibc and musl (Alpine ships libstdc++.so.6 too).
 build:linux --linkopt=-Wl,--no-as-needed --linkopt=-l:libstdc++.so.6
 build:linux --host_linkopt=-Wl,--no-as-needed --host_linkopt=-l:libstdc++.so.6
+
+# Windows (MSVC / cl.exe)
+# -----------------------
+# The GitHub windows-latest image ships Visual Studio Build Tools, which Bazel
+# auto-detects with no extra configuration -- so the Windows leg uses MSVC
+# rather than clang-cl (which would mean installing LLVM and setting
+# BAZEL_LLVM/USE_CLANG_CL, more moving parts for no gain here). The flags below
+# are the MSVC spellings of the build:unix flags, plus the switches GoogleSQL's
+# heavily-templated, generated sources need under cl.exe. Host tools (protoc
+# and friends) are compiled with MSVC too, hence the matching --host_* flags.
+#
+# --enable_platform_specific_config applies this block automatically on Windows.
+# The MAX_PATH workaround (--output_base=C:/_b) is a startup flag, which a
+# bazelrc config cannot carry, so it stays on the command line (see
+# .github/workflows/windows-probe.yml).
+build:windows --cxxopt=/std:c++20 --host_cxxopt=/std:c++20
+# /utf-8: GoogleSQL and ICU carry u"" / char16_t literals whose bytes cl.exe
+# otherwise misreads under the system code page.
+build:windows --copt=/utf-8 --host_copt=/utf-8
+# /bigobj: the generated parser and resolved_ast translation units blow past
+# cl.exe's default 65,279-section object limit.
+build:windows --cxxopt=/bigobj --host_cxxopt=/bigobj
+# Make cl.exe report a conforming __cplusplus and use the conforming
+# preprocessor -- both are feature-detected by Abseil and protobuf.
+build:windows --cxxopt=/Zc:__cplusplus --cxxopt=/Zc:preprocessor
+build:windows --host_cxxopt=/Zc:__cplusplus --host_cxxopt=/Zc:preprocessor
+# <windows.h> (now pulled in by common/thread_stack.cc) defines min/max macros
+# and, without WIN32_LEAN_AND_MEAN, the whole Win32 surface. NOMINMAX keeps
+# std::min/std::max and numeric_limits::max() compiling. _CRT_SECURE_NO_WARNINGS
+# quiets the CRT deprecation noise for the POSIX-name shims (_access, _mkdir)
+# the GoogleSQL source patches use.
+build:windows --copt=/DNOMINMAX --copt=/DWIN32_LEAN_AND_MEAN --copt=/D_CRT_SECURE_NO_WARNINGS
+build:windows --host_copt=/DNOMINMAX --host_copt=/DWIN32_LEAN_AND_MEAN --host_copt=/D_CRT_SECURE_NO_WARNINGS
 
 # Visibility
 # ----------

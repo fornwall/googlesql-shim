@@ -33,7 +33,7 @@ import urllib.request
 from pathlib import Path
 
 # Pull request numbers on fornwall/googlesql, applied in this order.
-PRS = [1, 3, 4, 5]
+PRS = [1, 3, 4, 5, 7]
 
 REPO = "fornwall/googlesql"
 ROOT = Path(__file__).resolve().parent

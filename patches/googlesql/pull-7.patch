@@ -1,0 +1,101 @@
+From 5a7b24644bc7d8af663004a086e1cf6057d53389 Mon Sep 17 00:00:00 2001
+From: Fredrik Fornwall <fredrik@fornwall.net>
+Date: Fri, 24 Jul 2026 10:25:33 +0200
+Subject: [PATCH] Make common/thread_stack.cc compile without pthread/unistd
+ (Windows)
+
+The googlesql-shim Windows probe (x86_64-pc-windows, MSVC/clang-cl)
+clears every build-system blocker and then stops at GoogleSQL's own
+POSIX source dependencies. After base/logging.cc (a separate change),
+the next one is googlesql/common/thread_stack.cc: it includes
+<pthread.h> and <unistd.h> and uses PTHREAD_STACK_MIN plus the
+pthread_getattr_np/pthread_attr_getstack family, none of which exist
+on Windows.
+
+Blocker by blocker, all guarded by #ifdef _WIN32 with the POSIX code
+kept verbatim under #else:
+
+- <pthread.h>: the only use is reading the current thread's stack
+  bounds in SetToCurrentThreadStackBoundaries(). Windows 8 / Server
+  2012 and later expose these directly via GetCurrentThreadStackLimits
+  (declared by <windows.h>), whose LowLimit/HighLimit map exactly onto
+  the existing thread_stack_low_/thread_stack_high_ (lowest/highest
+  address) convention. A new #if defined(_WIN32) arm is added ahead of
+  the existing __APPLE__/Linux arms.
+
+- PTHREAD_STACK_MIN: used only in the default value of
+  --googlesql_enough_stack_bytes (2 * PTHREAD_STACK_MIN). MSVC's CRT
+  has no such macro; a #ifndef fallback defines it to 16384, the value
+  glibc uses, so the flag's default is identical across platforms.
+
+- <unistd.h>: included but never referenced in this translation unit
+  (as in base/logging.cc's vestigial <libgen.h>). It is kept on POSIX
+  and simply not included under _WIN32.
+
+Behavior on Linux/macOS is unchanged: with _WIN32 undefined the
+preprocessed translation unit is byte-identical to before -- the added
+#ifdef _WIN32 arm is skipped, the includes expand in their original
+order (<pthread.h>, <string.h>, <unistd.h>), and the boundary function
+falls through to the unchanged #elif defined(__APPLE__)/#else arms.
+
+The Windows path was written against the documented
+GetCurrentThreadStackLimits contract but not compiled here: no MSVC or
+Windows SDK was available in this environment. It is validated by the
+googlesql-shim windows-probe CI leg.
+
+Signed-off-by: Fredrik Fornwall <fredrik@fornwall.net>
+---
+ googlesql/common/thread_stack.cc | 30 +++++++++++++++++++++++++++++-
+ 1 file changed, 29 insertions(+), 1 deletion(-)
+
+diff --git a/googlesql/common/thread_stack.cc b/googlesql/common/thread_stack.cc
+index 446eec6e6..db3a7e54a 100644
+--- a/googlesql/common/thread_stack.cc
++++ b/googlesql/common/thread_stack.cc
+@@ -15,9 +15,27 @@
+ 
+ #include "googlesql/common/thread_stack.h"
+ 
++#ifdef _WIN32
++// Windows/MSVC (and clang-cl) has neither <pthread.h> nor <unistd.h>. The
++// running thread's stack bounds come from GetCurrentThreadStackLimits (see
++// SetToCurrentThreadStackBoundaries below) rather than pthread attributes;
++// <windows.h> declares it. The POSIX path (this #else branch and the guarded
++// #else branch at the call site) is left unchanged, so behavior on
++// Linux/macOS is byte-identical.
++#include <windows.h>
++// glibc defines PTHREAD_STACK_MIN as 16384; MSVC's CRT has no such macro.
++// Define the same value so the default of --googlesql_enough_stack_bytes is
++// identical across platforms.
++#ifndef PTHREAD_STACK_MIN
++#define PTHREAD_STACK_MIN 16384
++#endif
++#else
+ #include <pthread.h>
++#endif
+ #include <string.h>
++#ifndef _WIN32
+ #include <unistd.h>
++#endif
+ 
+ #include <algorithm>
+ #include <atomic>
+@@ -57,7 +75,17 @@ std::ostream& operator<<(std::ostream& os, const ThreadStackStats& stats) {
+ }
+ 
+ void ThreadStackStats::SetToCurrentThreadStackBoundaries() {
+-#if defined(__APPLE__)
++#if defined(_WIN32)
++  // Windows 8 / Server 2012 and later expose the running thread's stack
++  // bounds directly, so no pthread attributes are needed. LowLimit is the
++  // lowest and HighLimit the highest address of the current thread's stack
++  // region -- matching the low/high convention used below on Linux.
++  ULONG_PTR stack_low = 0;
++  ULONG_PTR stack_high = 0;
++  GetCurrentThreadStackLimits(&stack_low, &stack_high);
++  thread_stack_low_ = static_cast<std::uintptr_t>(stack_low);
++  thread_stack_high_ = static_cast<std::uintptr_t>(stack_high);
++#elif defined(__APPLE__)
+   void* stack_addr = pthread_get_stackaddr_np(pthread_self());
+   size_t stack_size = pthread_get_stacksize_np(pthread_self());
+   // The Apple stack pointer is to the highest address, the opposite
