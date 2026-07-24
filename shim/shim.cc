@@ -334,6 +334,26 @@ absl::Status AnalyzeWithCatalogImpl(const uint8_t* options_bytes,
     return emit(resp, out, out_len, err);                          \
   }
 
+// The exception firewalls below compile away when the toolchain builds with
+// exceptions disabled (wasm32-emscripten's default): with no unwinding, a
+// throw already aborts the process instead of crossing the C ABI, which is
+// the containment the firewall exists to provide -- minus the error message.
+#if defined(__cpp_exceptions)
+#define GSQL_TRY try
+#define GSQL_CATCH_RETURN_INTERNAL                                \
+  catch (const std::exception& e) {                               \
+    *err = dup_cstr(std::string("C++ exception: ") + e.what());   \
+    return static_cast<int>(absl::StatusCode::kInternal);         \
+  }                                                               \
+  catch (...) {                                                   \
+    *err = dup_cstr("unknown C++ exception");                     \
+    return static_cast<int>(absl::StatusCode::kInternal);         \
+  }
+#else
+#define GSQL_TRY
+#define GSQL_CATCH_RETURN_INTERNAL
+#endif
+
 extern "C" {
 
 gsql_service* gsql_service_new(void) {
@@ -354,7 +374,7 @@ int gsql_call(gsql_service* svc, int method, const uint8_t* req, size_t req_len,
 
   // GoogleSQL is exception-free internally, but protobuf and the allocator are
   // not. Unwinding across the C ABI is UB, so it stops here.
-  try {
+  GSQL_TRY {
     switch (method) {
       GSQL_DISPATCH(GSQL_PARSE, Parse, ls::ParseRequest, ls::ParseResponse)
       GSQL_DISPATCH(GSQL_ANALYZE, Analyze, ls::AnalyzeRequest,
@@ -402,13 +422,8 @@ int gsql_call(gsql_service* svc, int method, const uint8_t* req, size_t req_len,
         *err = dup_cstr("unknown method code");
         return static_cast<int>(absl::StatusCode::kUnimplemented);
     }
-  } catch (const std::exception& e) {
-    *err = dup_cstr(std::string("C++ exception: ") + e.what());
-    return static_cast<int>(absl::StatusCode::kInternal);
-  } catch (...) {
-    *err = dup_cstr("unknown C++ exception");
-    return static_cast<int>(absl::StatusCode::kInternal);
   }
+  GSQL_CATCH_RETURN_INTERNAL
 }
 
 int gsql_analyze_with_catalog(const uint8_t* options, size_t options_len,
@@ -421,19 +436,14 @@ int gsql_analyze_with_catalog(const uint8_t* options, size_t options_len,
   *err = nullptr;
 
   // Same exception firewall as `gsql_call`: unwinding across the C ABI is UB.
-  try {
+  GSQL_TRY {
     ls::AnalyzeResponse response;
     absl::Status st = AnalyzeWithCatalogImpl(options, options_len, sql, sql_len,
                                              callbacks, ctx, &response);
     if (!st.ok()) return fail(st, err);
     return emit(response, out, out_len, err);
-  } catch (const std::exception& e) {
-    *err = dup_cstr(std::string("C++ exception: ") + e.what());
-    return static_cast<int>(absl::StatusCode::kInternal);
-  } catch (...) {
-    *err = dup_cstr("unknown C++ exception");
-    return static_cast<int>(absl::StatusCode::kInternal);
   }
+  GSQL_CATCH_RETURN_INTERNAL
 }
 
 }  // extern "C"

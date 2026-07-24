@@ -1,0 +1,53 @@
+# The WebAssembly experiment's support files. See wasm/README.md.
+
+load("@emsdk//emscripten_toolchain:wasm_rules.bzl", "wasm_cc_binary")
+load("@rules_cc//cc:defs.bzl", "cc_binary")
+
+# Drives the parser through the shim's C ABI inside a wasm module; run it
+# under node (wasm/README.md has the command). Built via the ordinary
+# cc_binary + the emsdk transition wrapper, so `bazel build --config=wasm
+# //wasm:smoke_wasm` and a plain `bazel build //wasm:smoke_wasm` both work.
+cc_binary(
+    name = "smoke",
+    srcs = ["smoke.c"],
+    linkopts = [
+        # The embedded ICU data plus the analyzer's working set: the static
+        # data alone exceeds emscripten's default initial memory, and the
+        # builtin-function catalog wants heap beyond that.
+        "-sINITIAL_MEMORY=128MB",
+        "-sALLOW_MEMORY_GROWTH=1",
+        # GoogleSQL's parser and resolver recurse; the 64K default wasm
+        # stack is not sized for them.
+        "-sSTACK_SIZE=8MB",
+        # AnalyzerOptions' constructor CHECK-fails unless
+        # FindTimeZoneByName("America/Los_Angeles") works, and absl/cctz
+        # resolves names by reading /usr/share/zoneinfo from the (virtual)
+        # filesystem. Embed the host's tzdata (~0.6M) into the module's
+        # MEMFS at the same path. Deliberately non-hermetic -- the smoke
+        # test is not a release artifact; a real consumer must make the
+        # same decision (embed tzdata, or mount a filesystem).
+        "--embed-file=/usr/share/zoneinfo@/usr/share/zoneinfo",
+    ],
+    deps = [
+        "//shim:shim_lib",
+        # GoogleSQL compiles against headers-only @icu targets (so the release
+        # bundle stays ICU-free); an actual binary like this smoke test must
+        # therefore link the ICU code and data libraries itself, exactly like
+        # //shim:smoke_test does.
+        "@icu//:icudata_lib",
+        "@icu//:icui18n_lib",
+        "@icu//:icuio_lib",
+        "@icu//:icuuc_lib",
+    ],
+)
+
+wasm_cc_binary(
+    name = "smoke_wasm",
+    cc_target = ":smoke",
+    # Return main()'s exit code to node instead of keeping the runtime alive.
+    exit_runtime = True,
+    # The analyzer is single-threaded per request and the objects are built
+    # without atomics; the toolchain's default links with -pthread, which
+    # wasm-ld then rejects against non-atomics objects.
+    threads = "off",
+)

@@ -105,3 +105,37 @@ build:ubsan --platform_suffix=-ubsan
 build:ubsan --copt=-fsanitize=undefined
 build:ubsan --copt=-fno-sanitize-recover=all
 build:ubsan --linkopt=-fsanitize=undefined
+
+# WebAssembly (experimental)
+# --------------------------
+# `--config=wasm` targets wasm32-unknown-emscripten via the emsdk Bazel
+# toolchain declared in MODULE.bazel. See wasm/README.md.
+build:wasm --platforms=@emsdk//:platform_wasm
+
+# The build:linux section above keys on the *host* OS, so its GNU-ld link
+# flags (--no-as-needed, -l:libstdc++.so.6) would land on wasm-ld's command
+# line, which understands neither. Platform-specific config expansion happens
+# after explicit --config flags, so turning it off here suppresses build:linux
+# for wasm builds only; those GNU-ld flags exist for the native link and have
+# no meaning for wasm-ld.
+common:wasm --enable_platform_specific_config=false
+
+# absl and protobuf reach emscripten through their default POSIX select
+# branches, whose linkopts say -pthread/-lpthread; emcc reads -pthread as
+# "enable threads" and wasm-ld then refuses to mix shared memory with
+# objects compiled without atomics. Command-line linkopts land after
+# dependency linkopts, and emcc lets the last setting win. (-lpthread is
+# harmless: emscripten resolves it to its stub library.)
+build:wasm --linkopt=-sUSE_PTHREADS=0
+
+# emsdk 6.0.3 ships clang 23, ahead of the native release clang (LLVM 21).
+# That clang has deprecated things abseil still emits -- the
+# `lifetime_capture_by(this)` attribute spelling (raw_hash_map.h,
+# -Wdeprecated-attributes) and the `__EMSCRIPTEN_major__` macros (config.h,
+# -Wdeprecated-pragma) so far -- and GoogleSQL builds its TUs with -Werror,
+# so each deprecation is fatal only under the wasm toolchain. Demote the
+# whole -Wdeprecated group rather than chase subcategories as the toolchain
+# moves ahead of abseil; scope it to --config=wasm so the native legs, on the
+# older clang, are untouched. (Kept out of the global -Wno-* block above,
+# which mirrors GoogleSQL's own and stays in lockstep with it.)
+build:wasm --cxxopt=-Wno-deprecated
