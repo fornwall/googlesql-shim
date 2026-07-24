@@ -79,6 +79,28 @@ single_version_override(
     version = "1.6.1",
 )
 
+# Cross-compilation to x86_64 musl (--config=musl), used by the release
+# workflow's x86_64-linux-musl leg. hermetic_cc_toolchain wraps `zig cc`: it
+# bundles the musl sysroot and libc++, so a glibc Linux host can emit musl
+# target objects with no Alpine container, no musl-native Bazel, and no
+# musl hermetic CPython -- the exec configuration stays glibc, so protoc and
+# GoogleSQL's Python code generators run on the host as usual, and only the
+# TARGET objects compile for musl.
+#
+# Only the libc-AWARE musl toolchain is registered. It carries the
+# @zig_sdk//libc:musl constraint in its target_compatible_with, and the
+# matching @zig_sdk//libc_aware/platform:linux_amd64_musl platform carries the
+# same constraint value; a native/glibc build's target platform carries no
+# libc constraint, so toolchain resolution never selects this toolchain unless
+# --config=musl explicitly names the musl platform. Native, darwin and the
+# aarch64-musl (native-Alpine) legs are therefore untouched.
+bazel_dep(name = "hermetic_cc_toolchain", version = "4.2.0")
+
+zig_toolchains = use_extension("@hermetic_cc_toolchain//toolchain:ext.bzl", "toolchains")
+use_repo(zig_toolchains, "zig_sdk")
+
+register_toolchains("@zig_sdk//libc_aware/toolchain:linux_amd64_musl")
+
 # ICU, built natively by Bazel instead of GoogleSQL's rules_foreign_cc
 # (autotools) build: the same icu4c release GoogleSQL pins, under our own
 # BUILD file (third_party/icu/icu.BUILD, which also embeds the release's

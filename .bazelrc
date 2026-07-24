@@ -47,8 +47,27 @@ common --enable_platform_specific_config
 # symbols go unresolved. --no-as-needed, plus a spelling that is not
 # deduplicated against Bazel's own entry, forces it to land last. Works on
 # both glibc and musl (Alpine ships libstdc++.so.6 too).
-build:linux --linkopt=-Wl,--no-as-needed --linkopt=-l:libstdc++.so.6
+#
+# This is the HOST/exec side, always glibc-linux here (protoc and the Python
+# code generators). It stays unconditional. The matching TARGET-side flags are
+# NOT set here: they are glibc/Alpine-libstdc++ specific and would break the
+# zig/musl cross leg (--config=musl), whose fully static binaries ship libc++
+# and have no libstdc++.so.6. The three linked cc_test/cc_binary targets in
+# //shim carry the target-side flags themselves, via a libc-aware select in
+# shim/BUILD.bazel (the archives //shim:static ships never link, so no
+# link flag reaches them). See that file.
 build:linux --host_linkopt=-Wl,--no-as-needed --host_linkopt=-l:libstdc++.so.6
+
+# musl cross-compile (--config=musl)
+# ----------------------------------
+# Targets x86_64-linux-musl from a glibc host via the hermetic_cc_toolchain
+# (zig cc) registered in MODULE.bazel. The libc-aware musl platform carries the
+# @zig_sdk//libc:musl constraint, which is what makes toolchain resolution pick
+# the zig musl toolchain for the target while the exec configuration stays on
+# the host's autodetect (glibc clang) toolchain. Fully static output (zig's
+# musl toolchain links static by default) so //shim:smoke_test -- same arch as
+# the host -- runs directly on the glibc runner, preserving the behavioral gate.
+build:musl --platforms=@zig_sdk//libc_aware/platform:linux_amd64_musl
 
 # Visibility
 # ----------

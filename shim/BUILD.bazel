@@ -11,6 +11,30 @@ load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_library", "cc_test")
 load(":link_extras.bzl", "cc_alwayslink_objects")
 load(":proto_closure.bzl", "proto_closure")
 
+# The target-side C++ runtime link flags for the linked binaries in this
+# package. The shipped archives (//shim:static) never link, so these reach no
+# release artifact -- only the cc_test/cc_binary targets below. On glibc-linux
+# and the native-Alpine musl leg the closure's C++ runtime symbols resolve
+# against the system libstdc++.so.6, forced to land last with --no-as-needed
+# (Bazel drops it under -as-needed otherwise; see the .bazelrc note, which
+# keeps the matching HOST/exec flags). The zig/musl cross leg (--config=musl)
+# links zig's bundled libc++ into a fully static binary instead, so it must NOT
+# reference libstdc++.so.6: the libc-aware musl platform carries
+# @zig_sdk//libc:musl, which this config_setting matches to select an empty list.
+config_setting(
+    name = "zig_musl",
+    constraint_values = ["@zig_sdk//libc:musl"],
+)
+
+_TARGET_CXX_RUNTIME_LINKOPTS = select({
+    ":zig_musl": [],
+    "@platforms//os:linux": [
+        "-Wl,--no-as-needed",
+        "-l:libstdc++.so.6",
+    ],
+    "//conditions:default": [],
+})
+
 cc_library(
     name = "shim_lib",
     srcs = ["shim.cc"],
@@ -71,6 +95,7 @@ cc_test(
     name = "smoke_test",
     size = "small",
     srcs = ["smoke_test.cc"],
+    linkopts = _TARGET_CXX_RUNTIME_LINKOPTS,
     # Fully static, like the shipped archives -- and necessary: the default
     # dev-mode dynamic link puts the (linkstatic) ICU data archive ahead of
     # the shared libraries whose undefined icudt76_dat would pull its
@@ -104,6 +129,7 @@ cc_test(
     name = "shim_callback_test",
     size = "large",
     srcs = ["shim_callback_test.cc"],
+    linkopts = _TARGET_CXX_RUNTIME_LINKOPTS,
     # linkstatic + the explicit ICU deps, for the same reasons as smoke_test
     # above: GoogleSQL compiles against headers-only @icu targets, so an
     # actual binary must link the ICU code and data libraries itself.
@@ -130,6 +156,7 @@ cc_test(
 cc_binary(
     name = "numeric_sqrt_oracle",
     srcs = ["numeric_sqrt_oracle.cc"],
+    linkopts = _TARGET_CXX_RUNTIME_LINKOPTS,
     linkstatic = True,
     deps = [
         "@googlesql//googlesql/public:numeric_value",

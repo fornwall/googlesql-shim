@@ -24,7 +24,7 @@ snapshotted by `create-patches.py`) — so there is no fork to keep rebased.
 |---|---|---|
 | `x86_64-linux-gnu` | released | `ubuntu-24.04` runner, apt.llvm.org clang (pinned major), glibc 2.39 |
 | `aarch64-linux-gnu` | released | `ubuntu-24.04-arm` runner, same toolchain recipe |
-| `x86_64-linux-musl` | released | Alpine 3.23 container (musl-native Bazel 8, Alpine clang) |
+| `x86_64-linux-musl` | released | Cross-compiled from the `ubuntu-24.04` glibc runner with the `hermetic_cc_toolchain` (zig cc) via `--config=musl` — no container; the exec configuration stays glibc so protoc and the Python code generators run on the host |
 | `aarch64-linux-musl` | released | Digest-pinned Alpine edge container on the arm64 runner (stable is not possible yet: no rules_python release ships an aarch64-musl CPython, so the generators' glibc interpreter needs gcompat + edge musl) |
 | `aarch64-apple-darwin` | released | `macos-15` runner, Homebrew llvm (same pinned major) |
 | `x86_64-apple-darwin` | released | `macos-15-intel` runner, same recipe (a `--cpu=darwin_x86_64` cross-compile from arm64 silently produced arm64 objects — the generic Unix toolchain ignores the legacy flag — so the leg builds natively) |
@@ -117,25 +117,37 @@ script. They apply in `PRS` order.
 
 ### The musl legs
 
-Upstream Bazel ships glibc-only binaries, so the musl build runs natively
-inside an Alpine container (`scripts/build-musl.sh`):
+The two musl targets are built two different ways, because the obstacle is
+not the same on both.
 
-- `bazel8` is the one package pulled from edge/testing (no stable branch
-  carries a Bazel), pinned per-command via `--repository`.
-- x86_64 builds on stable Alpine 3.23: GoogleSQL's code generators run
-  under rules_python's hermetic CPython, and the build selects the **musl**
-  python-build-standalone interpreter via
-  `RULES_PYTHON_REPO_TOOLCHAIN__LINUX_*` (host) and
-  `--@rules_python//python/config_settings:py_linux_libc=musl` (toolchains).
-  The host-selection env var is broken upstream (it compares the preference
-  against `(platform, meta)` tuples), so rules_python is taken via
-  `single_version_override` with the one-hunk
-  `patches/rules_python-host-preference.patch`.
-- aarch64 builds on a digest-pinned Alpine edge image instead: no
-  rules_python release ships an aarch64-musl interpreter, so the glibc
-  CPython must run — which needs `gcompat` plus edge's musl (stable's lacks
-  `posix_fallocate64`). Only the generators run under that interpreter;
-  every published object is compiled by Alpine clang against musl.
+**x86_64 is a cross-compile** from the glibc `ubuntu-24.04` runner
+(`--config=musl`, no container). `hermetic_cc_toolchain` (zig cc) supplies a
+libc-aware musl target toolchain — bundled musl sysroot and libc++, fetched by
+Bazel — registered in `MODULE.bazel` and selected only when the target
+platform is `@zig_sdk//libc_aware/platform:linux_amd64_musl`. The key is that
+the **exec configuration stays glibc**: protoc and GoogleSQL's Python code
+generators run on the host clang toolchain exactly as they do for the
+`linux-gnu` leg, and only the shipped target objects compile for musl. That
+removes the entire native-musl apparatus for this leg — no musl-native Bazel,
+no musl hermetic CPython, no `RULES_PYTHON_REPO_TOOLCHAIN__LINUX_*` /
+`py_linux_libc=musl` flags, no `gcompat`. zig links `//shim:smoke_test` fully
+static, and since musl and glibc x86_64 are the same architecture the
+behavioral gate runs directly on the runner.
+
+**aarch64 is still native inside an Alpine container** (`scripts/build-musl.sh`)
+because its blocker is a code-generator one, not a compiler one: no
+rules_python release ships an aarch64-musl CPython, so GoogleSQL's Python code
+generators have no musl interpreter to run under. The container runs the glibc
+CPython under `gcompat` plus edge's musl (stable's lacks `posix_fallocate64`),
+which only works when the whole build is native musl. `bazel8` is pulled from
+Alpine edge/testing (no stable branch carries a Bazel), pinned per-command via
+`--repository`. Only the generators run under that interpreter; every published
+object is compiled by Alpine clang against musl. The
+`patches/rules_python-host-preference.patch` / `single_version_override` in
+`MODULE.bazel` is retained (it is inert unless the host-preference env var is
+set, which no leg does now, but removing it would perturb the aarch64 leg's
+dependency resolution — out of scope here).
+
 - `shim/link_extras.bzl` uses public `LibraryToLink` fields and emits Apple
   `libtool` or ar-style archiver arguments as the toolchain requires, so the
   same rules analyze under Bazel 9 (glibc, macOS) and Alpine's Bazel 8.
@@ -160,10 +172,15 @@ bazel build -c opt --force_pic \
   --repo_env=CC=/path/to/clang --repo_env=CXX=/path/to/clang++ \
   //shim:static
 
-# musl (needs docker):
+# x86_64 musl (cross-compiled from a glibc host, needs clang + bazelisk):
+bazel build -c opt --force_pic --config=musl \
+  --repo_env=CC=/path/to/clang --repo_env=CXX=/path/to/clang++ \
+  //shim:static
+
+# aarch64 musl (native, needs docker on an arm64 host):
 mkdir -p dist
-docker run --rm -v "$PWD":/src:ro -v "$PWD/dist":/out alpine:3.23 \
-  sh /src/scripts/build-musl.sh
+docker run --rm -v "$PWD":/src:ro -v "$PWD/dist":/out \
+  alpine:edge sh /src/scripts/build-musl.sh
 ```
 
 Build with Clang, not GCC (GCC 15 rejects GoogleSQL's
