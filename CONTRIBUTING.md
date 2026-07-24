@@ -6,10 +6,10 @@ Changes to the shim's *behaviour* usually belong in smallquery (whose
 `crates/googlesql-sys/shim` these sources originate from). Changes to GoogleSQL
 itself go upstream as pull requests against
 [fornwall/googlesql](https://github.com/fornwall/googlesql) and are applied to
-the pinned `google/googlesql` commit as the patches in `patches/googlesql/`
-(refresh them with `create-patches.sh`, and keep the `patches = [...]` list in
-`MODULE.bazel` in sync). Changes to how the archives are built, packaged and
-released belong here.
+the pinned `google/googlesql` commit as the patches in `patches/googlesql/`.
+Edit the `PRS` array in `create-patches.sh` and re-run it: it refreshes the
+patch files and regenerates the `patches = [...]` list in `MODULE.bazel`.
+Changes to how the archives are built, packaged and released belong here.
 
 ## Checks
 

@@ -108,9 +108,12 @@ attribute in `MODULE.bazel`, from `patches/googlesql/`:
 
 Each patch is an open pull request against
 [fornwall/googlesql](https://github.com/fornwall/googlesql). `create-patches.sh`
-fetches the current `.patch` for each PR into `patches/googlesql/`; edit the
-`PRS` list in that script (and the matching `patches = [...]` list in
-`MODULE.bazel`) to add or drop one. They apply in listed order.
+is the single source of truth: its `PRS` array drives everything. Running it
+fetches the current `.patch` for each PR into `patches/googlesql/`, deletes any
+patch file for a PR no longer listed, and regenerates the `patches = [...]` list
+in `MODULE.bazel` (a Bazel label list can't be a wildcard, so it's generated
+rather than hand-maintained). To add or drop a patch, edit `PRS` and re-run the
+script. They apply in `PRS` order.
 
 ### The musl legs
 
