@@ -1,0 +1,49 @@
+From 08ff5eeb982d691cfb40e735cf233f8bdb661be4 Mon Sep 17 00:00:00 2001
+From: Fredrik Fornwall <fredrik@fornwall.net>
+Date: Thu, 23 Jul 2026 01:27:22 +0200
+Subject: [PATCH] Fix RoundUpToNextPowerOfTwo overflow on targets where long is
+ 32-bit
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+RoundUpToNextPowerOfTwo in googlesql/public/types/internal_utils.h
+computes its range guard and clamp value as `1L << 62`. The literal
+`1L` has type `long`, and on any target where `long` is 32 bits the
+shift count exceeds the type width, which is undefined behaviour.
+That covers all ILP32 targets — wasm32 (emscripten), 32-bit ARM,
+x86-32 — and also 64-bit Windows, whose LLP64 data model keeps
+`long` at 32 bits even though pointers are 64-bit.
+
+Observed under wasm32-emscripten: the guard misfires for ordinary
+small inputs, logging "Out of range: 2" on every analyzer run and
+returning a garbage rounded value. The function only feeds
+GetRawHashSetCapacityEstimateFromExpectedSize, so analysis results
+are unaffected, but hash-set memory-usage estimates are wrong and
+the ERROR logs are noise.
+
+Use `int64_t{1} << 62` for both the mask and the clamp, which is
+identical to the old behaviour on LP64 and correct everywhere else.
+
+Signed-off-by: Fredrik Fornwall <fredrik@fornwall.net>
+---
+ googlesql/public/types/internal_utils.h | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/googlesql/public/types/internal_utils.h b/googlesql/public/types/internal_utils.h
+index ad8efed28..5fe3c135f 100644
+--- a/googlesql/public/types/internal_utils.h
++++ b/googlesql/public/types/internal_utils.h
+@@ -78,10 +78,10 @@ static size_t GetArrayAllocationMemoryEstimate(size_t elements_count) {
+ 
+ // Rounds up the capacity to the next power of 2
+ inline int64_t RoundUpToNextPowerOfTwo(int64_t n) {
+-  if (n < 0 || (n & (1L << 62)) != 0) {
++  if (n < 0 || (n & (int64_t{1} << 62)) != 0) {
+     ABSL_LOG(ERROR) << "Out of range: " << n;
+     // Restrict to the valid range.
+-    return n < 0 ? 1 : 1L << 62;
++    return n < 0 ? 1 : int64_t{1} << 62;
+   }
+ 
+   int64_t power = 1;

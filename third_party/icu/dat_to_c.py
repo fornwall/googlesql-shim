@@ -29,8 +29,8 @@ def main() -> None:
             "U_CDECL_BEGIN\n"
             "const struct {\n"
             "    double bogus;\n"
-            "    uint8_t bytes[%d]; \n"
-            "} %s_dat={ 0.0, {\n" % (len(data), entry_name)
+            f"    uint8_t bytes[{len(data)}]; \n"
+            f"}} {entry_name}_dat={{ 0.0, {{\n"
         )
         # 16 bytes per line keeps the file editor-safe; the exact wrapping
         # genccode uses does not matter to the compiler.

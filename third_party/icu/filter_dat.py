@@ -77,14 +77,20 @@ def filter_dat(data: bytes, should_remove) -> bytes:
 
 def main() -> None:
     src, patterns_path, dst = sys.argv[1], sys.argv[2], sys.argv[3]
-    patterns = [
-        re.compile(line.strip())
-        for line in open(patterns_path, encoding="ascii")
-        if line.strip() and not line.startswith("#")
-    ]
-    should_remove = lambda name: any(p.search(name) for p in patterns)  # noqa: E731
-    data = open(src, "rb").read()
-    open(dst, "wb").write(filter_dat(data, should_remove))
+    with open(patterns_path, encoding="ascii") as f:
+        patterns = [
+            re.compile(line.strip())
+            for line in f
+            if line.strip() and not line.startswith("#")
+        ]
+
+    def should_remove(name: str) -> bool:
+        return any(p.search(name) for p in patterns)
+
+    with open(src, "rb") as f:
+        data = f.read()
+    with open(dst, "wb") as f:
+        f.write(filter_dat(data, should_remove))
 
 
 if __name__ == "__main__":

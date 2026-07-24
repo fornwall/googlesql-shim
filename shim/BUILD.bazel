@@ -62,8 +62,9 @@ cc_library(
 
 # The behavioral gate every release leg runs in its exact build
 # configuration: analyzes a statement whose constant fold once broke under
-# `-c opt` (a GOOGLESQL_QCHECK_OK/NDEBUG bug, fixed upstream in
-# fornwall/googlesql#5) and asserts the folded literal is the right value.
+# `-c opt` (a GOOGLESQL_QCHECK_OK/NDEBUG bug, fixed by
+# patches/googlesql/pull-5.patch, fornwall/googlesql#5) and asserts the folded
+# literal is the right value.
 # A build that computes wrong answers must fail its leg, not ship. See
 # smoke_test.cc.
 cc_test(

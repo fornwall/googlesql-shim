@@ -4,7 +4,13 @@
 # - clang-format (pinned via pip, so local runs can match exactly) on the
 #   C++ shim sources,
 # - buildifier on the Bazel files (MODULE.bazel, BUILD.bazel, *.bzl),
-# - shellcheck on the shell scripts.
+# - shellcheck on the shell scripts,
+# - ruff (lint + format) and pyrefly (type check) on the Python sources.
+#
+# ruff runs via the official astral-sh/ruff-action (dependabot keeps the action
+# current); pyrefly via Meta's documented `pip install pyrefly` (its composite
+# action does not stage on GitHub). Neither tool version is pinned, so CI tracks
+# the latest of each. clang-format and buildifier stay version-pinned.
 
 name: ci
 
@@ -56,3 +62,33 @@ jobs:
         run: |
           shellcheck --version
           git ls-files '*.sh' | xargs -r shellcheck
+
+  ruff:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      # No `version` input: the action installs the latest ruff, so CI tracks
+      # ruff's evolving default ruleset instead of us maintaining a select.
+      # Dependabot's github-actions ecosystem keeps the action tag current.
+      - name: Lint the Python sources
+        uses: astral-sh/ruff-action@v3
+      - name: Format-check the Python sources
+        uses: astral-sh/ruff-action@v3
+        with:
+          args: "format --check"
+
+  pyrefly:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      # Meta's documented manual CI method (`pip install pyrefly` + check with
+      # GitHub-annotation output). Their composite action facebook/pyrefly is
+      # not usable: @1.1.1 fails to stage (a dangling pyrefly_wasm/rust-toolchain
+      # symlink), and @main stages but passes `--output-format full-text-with-
+      # github`, a value the latest pyrefly it installs no longer accepts.
+      # Unpinned, like ruff, so CI tracks latest pyrefly.
+      - name: Type-check the Python sources
+        run: |
+          pip install pyrefly
+          pyrefly --version
+          git ls-files '*.py' | xargs pyrefly check --output-format=github
