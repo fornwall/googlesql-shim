@@ -26,7 +26,7 @@ env:
   # The upstream google/googlesql commit MODULE.bazel pins (asserted below, so
   # the release notes cannot drift from the actual build input). The shim's
   # fixes are applied on top as the patches in patches/googlesql/, not carried
-  # on a fork -- see MODULE.bazel and create-patches.sh.
+  # on a fork -- see MODULE.bazel and create-patches.py.
   GOOGLESQL_COMMIT: 1f8aa333f4d6353cd3a64471fc83121df72df3f7
   # One LLVM major for the gnu and darwin legs: apt.llvm.org's latest
   # stable branch for noble, which Homebrew also serves as llvm@21.
@@ -80,7 +80,7 @@ jobs:
         run: |
           grep -q "$GOOGLESQL_COMMIT" MODULE.bazel
           # Every checked-in GoogleSQL patch must be referenced by MODULE.bazel
-          # (and vice versa), so a patch added/removed with create-patches.sh
+          # (and vice versa), so a patch added/removed with create-patches.py
           # cannot silently drift from what the build actually applies.
           for p in patches/googlesql/*.patch; do
             grep -q "//patches/googlesql:$(basename "$p")" MODULE.bazel \

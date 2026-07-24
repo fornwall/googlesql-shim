@@ -16,7 +16,7 @@ are now versioned by this repository. GoogleSQL itself is not vendored here:
 [google/googlesql](https://github.com/google/googlesql) commit, and applies the
 fixes smallquery needs on top as the patches in `patches/googlesql/` (the open
 pull requests against [fornwall/googlesql](https://github.com/fornwall/googlesql),
-snapshotted by `create-patches.sh`) — so there is no fork to keep rebased.
+snapshotted by `create-patches.py`) — so there is no fork to keep rebased.
 
 ## Platform support
 
@@ -107,7 +107,7 @@ attribute in `MODULE.bazel`, from `patches/googlesql/`:
 | `pull-5.patch` | Fixes `GOOGLESQL_QCHECK_OK` silently compiling out its argument under `NDEBUG`, which made `-c opt` builds return the wrong `DATE`→`DATETIME` constant fold. |
 
 Each patch is an open pull request against
-[fornwall/googlesql](https://github.com/fornwall/googlesql). `create-patches.sh`
+[fornwall/googlesql](https://github.com/fornwall/googlesql). `create-patches.py`
 is the single source of truth: its `PRS` array drives everything. Running it
 fetches the current `.patch` for each PR into `patches/googlesql/`, deletes any
 patch file for a PR no longer listed, and regenerates the `patches = [...]` list
